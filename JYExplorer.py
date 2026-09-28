@@ -29,10 +29,11 @@ from PySide6.QtWidgets import (
 )
 
 import fileops as F
+import favsync as FSY
 import filesearch as FS
 import mediainfo as MI
 import search_ui as SUI
-from jycommon import (BACKUP_DIR, BOOKMARKS_FILE, EXPLORER_FILE, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, add_item_to_launcher, app_icon, backup_favorites,
+from jycommon import (BACKUP_DIR, BOOKMARKS_FILE, EXPLORER_FILE, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, add_item_to_launcher, app_icon, backup_favorites, cleanup_backups, read_backup,
                       load_font, load_json, pick_category, save_json)
 from updater import Updater
 from version import __version__
@@ -2149,65 +2150,6 @@ class JobRunner(QObject):
             self.queueChanged.emit(len(self.queue))
 
 
-class FavImportDialog(QDialog):
-    """Windows 탐색기 즐겨찾기(고정 폴더) 가져오기: 항목 선택 + 가져올 위치 + 교체 여부"""
-
-    def __init__(self, parent, entries, have_quick, have_bm):
-        super().__init__(parent)
-        self.setWindowTitle("Windows 탐색기 즐겨찾기 불러오기")
-        self.setMinimumSize(560, 460)
-        self.entries = entries
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 18, 22, 18)
-        lay.setSpacing(8)
-        info = QLabel("Windows 탐색기 '즐겨찾기'에 고정돼 있는 폴더입니다. 가져올 항목을 선택하세요.\n"
-                      "기본은 지금 있는 내용을 그대로 두고 추가만 합니다. 가져오기 전에 현재 내용은 자동 백업됩니다.")
-        info.setObjectName("dim")
-        info.setWordWrap(True)
-        lay.addWidget(info)
-        from PySide6.QtWidgets import QListWidget as _LW
-        self.list = _LW()
-        self.have_quick, self.have_bm = have_quick, have_bm
-        for e in entries:
-            it = QListWidgetItem(f"{e['name']}    {e['path']}")
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Checked)
-            self.list.addItem(it)
-        lay.addWidget(self.list, 1)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("가져올 위치"))
-        self.dest = QComboBox()
-        self.dest.addItems(["북마크", "빠른 이동"])
-        self.dest.currentIndexChanged.connect(self._mark_dups)
-        row.addWidget(self.dest)
-        row.addStretch(1)
-        lay.addLayout(row)
-        self.replace = QCheckBox("현재 내용을 지우고 이것으로 교체 (교체 전 자동 백업)")
-        lay.addWidget(self.replace)
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        ok = QPushButton("가져오기")
-        ok.setObjectName("accent")
-        ok.clicked.connect(self.accept)
-        cancel = QPushButton("취소")
-        cancel.clicked.connect(self.reject)
-        btns.addWidget(ok)
-        btns.addWidget(cancel)
-        lay.addLayout(btns)
-        self._mark_dups()
-
-    def _mark_dups(self, *_):
-        have = self.have_bm if self.dest.currentIndex() == 0 else self.have_quick
-        for i, e in enumerate(self.entries):
-            it = self.list.item(i)
-            dup = os.path.normcase(e["path"]) in have
-            it.setText(f"{e['name']}    {e['path']}" + ("    (이미 있음)" if dup else ""))
-            it.setCheckState(Qt.Unchecked if dup else Qt.Checked)
-
-    def selected(self):
-        return [e for i, e in enumerate(self.entries) if self.list.item(i).checkState() == Qt.Checked]
-
-
 # ───────────────────────── 메인 윈도우 ─────────────────────────
 class Main(QMainWindow):
     _ui = Signal(object)   # 작업 스레드에서 화면 갱신을 안전하게 요청
@@ -2238,7 +2180,14 @@ class Main(QMainWindow):
                         v.apply_columns()
         FileView.on_cols_changed = cols_changed
         self.show_hidden = self.data.get("show_hidden", False)
-        self.sync_fav = self.data.get("sync_fav", True)
+        on = self.data.get("fav_sync_on")
+        if on is None:                                        # 예전 설정 '북마크를 Windows 즐겨찾기에도 등록' 을 이어받음 (이미 쓰던 사용자는 켜짐)
+            on = self.data.get("sync_fav", bool(self.data.get("session")))
+        self.fav_sync_on = bool(on)
+        self.data.pop("sync_fav", None)
+        self._sync_busy = False
+        self._skip_sync_on_quit = False
+        cleanup_backups()                                     # 90일 지난 백업 정리
         self.bm = load_json(BOOKMARKS_FILE, {"children": []})
         self.bm.setdefault("children", [])
         self.quitting = False
@@ -2432,6 +2381,7 @@ class Main(QMainWindow):
         self.restore_session()
         self._restoring = False
         self.update_toolbar_star()
+        QTimer.singleShot(4000, lambda: self.run_sync("시작"))        # 켜져 있으면 시작할 때 한 번 맞춤
 
     # ---- 구성 보조 ----
     def _sect(self, text):
@@ -2589,7 +2539,7 @@ class Main(QMainWindow):
             add("반대편으로 복사", lambda: self.runner.submit("copy", paths, dest))
             add("반대편으로 이동", lambda: (self.runner.submit("move", paths, dest), QTimer.singleShot(1500, page.tree.prune_missing)))
 
-        if self.data.get("shell_menu", True):
+        if True:
             try:
                 import shellmenu as SM
                 m = SM.ShellMenu(paths, os.path.dirname(paths[0]), extended=bool(QGuiApplication.keyboardModifiers() & Qt.ShiftModifier))
@@ -2792,6 +2742,7 @@ class Main(QMainWindow):
 
     def quit_app(self):
         self.quitting = True
+        self.sync_blocking("종료")
         self.save_session()
         if self.hook is not None:
             self.hook.uninstall()
@@ -2799,7 +2750,7 @@ class Main(QMainWindow):
 
     def apply_win_e(self):
         """설정에 따라 Win+E 가로채기를 켜거나 끔. 성공 여부 반환"""
-        on = self.data.get("win_e", True)
+        on = True                                             # Win+E 로 JY Explorer 열기는 항상 켜짐
         if on and self.hook is None:
             h = WinEHook(self.bring_to_front)
             if not h.install():
@@ -2983,7 +2934,6 @@ class Main(QMainWindow):
                     add("새 탭에서 열기", lambda: pane.add_tab(single))
                     add("북마크에 추가", lambda: self.add_bookmark(single))
                     add("빠른 이동에 추가", lambda: self.add_quick(single))
-                    add("Windows 즐겨찾기에 고정", lambda: self.pin_windows(single))
                     add("경로 복사", lambda: QApplication.clipboard().setText("\r\n".join(paths)))
                     add("런처에 추가", lambda: self.add_to_launcher(paths))
                 else:
@@ -3033,7 +2983,7 @@ class Main(QMainWindow):
 
     def show_file_menu(self, pane, view, pos, paths):
         self.set_active(pane)
-        if self.data.get("shell_menu", True):
+        if True:
             try:
                 self._shell_menu(pane, view, pos, paths)
                 return
@@ -3049,7 +2999,6 @@ class Main(QMainWindow):
                 m.addAction("새 탭에서 열기", lambda: pane.add_tab(single))
                 m.addAction("북마크에 추가", lambda: self.add_bookmark(single))
                 m.addAction("빠른 이동에 추가", lambda: self.add_quick(single))
-                m.addAction("Windows 즐겨찾기에 고정", lambda: self.pin_windows(single))
             m.addAction("런처에 추가", lambda: self.add_to_launcher(paths))
             m.addSeparator()
             m.addAction("복사  (Ctrl+C)", lambda: self.set_clipboard(paths, False))
@@ -3097,19 +3046,10 @@ class Main(QMainWindow):
         self.bookmarks_changed()
         if not quiet:
             self.say("북마크 추가: " + tab_title(path))
-        if self.sync_fav:
-            self.pin_windows(path, quiet=True)
 
     def on_bookmark_drop(self, paths, target):
         for p in paths:
             self.add_bookmark(p, target)
-
-    def pin_windows(self, path, quiet=False):
-        def run():
-            ok = F.pin_home(path)
-            if not quiet:
-                self._ui.emit(lambda: self.say("Windows 즐겨찾기에 고정" if ok else "즐겨찾기 고정 실패"))
-        threading.Thread(target=run, daemon=True).start()
 
     def _all_paths(self, kids):
         for n in kids:
@@ -3237,8 +3177,6 @@ class Main(QMainWindow):
                 m.addAction("현재 폴더 북마크에 추가", lambda: self.add_bookmark(self.active_view().path))
                 m.addAction("폴더 선택하여 북마크 추가…", self.add_bookmark_dialog)
                 m.addAction("새 북마크 폴더…", self.new_bm_folder)
-                m.addSeparator()
-                m.addAction("Windows 탐색기 즐겨찾기 불러오기…", self.import_windows_favorites)
             else:
                 m.addAction("최근 목록 지우기" if payload == "recent" else "자주 가는 곳 목록 지우기",
                             lambda: self.clear_visits(payload))
@@ -3308,8 +3246,6 @@ class Main(QMainWindow):
             self._remove_node(n)
         self.bookmarks_changed()
         self.say("북마크 해제: " + tab_title(path))
-        if self.sync_fav:
-            threading.Thread(target=F.unpin_home, args=(path,), daemon=True).start()
 
     def _parent_list(self, node, kids=None):
         kids = self.bm["children"] if kids is None else kids
@@ -3598,14 +3534,8 @@ class Main(QMainWindow):
             self.bookmarks_changed()
 
     def delete_node(self, n):
-        removed = list(self._all_paths([n])) if n["type"] == "folder" else [n["path"]]
         self._remove_node(n)
         self.bookmarks_changed()
-        if self.sync_fav:
-            still = {os.path.normcase(p) for p in self._all_paths(self.bm["children"])}
-            for p in removed:
-                if os.path.normcase(p) not in still:
-                    threading.Thread(target=F.unpin_home, args=(p,), daemon=True).start()
 
     def new_bm_folder(self, parent=None):
         """북마크 폴더 만들기. parent(북마크 폴더 노드)를 주면 그 안에 (폴더 안의 폴더)"""
@@ -3625,25 +3555,16 @@ class Main(QMainWindow):
         a.setCheckable(True)
         a.setChecked(self.show_hidden)
         a.triggered.connect(self.toggle_hidden)
-        b = m.addAction("북마크를 Windows 즐겨찾기에도 등록")
+        b = m.addAction("북마크 = Windows 즐겨찾기 동기화")
         b.setCheckable(True)
-        b.setChecked(self.sync_fav)
-        b.triggered.connect(self.toggle_sync)
-        m.addAction("기존 북마크 전체를 Windows 즐겨찾기에 등록", self.sync_all_fav)
+        b.setChecked(self.fav_sync_on)
+        b.triggered.connect(self.toggle_fav_sync)
+        now = m.addAction("지금 동기화", lambda: self.run_sync("수동", manual=True))
+        now.setEnabled(self.fav_sync_on)
         m.addSeparator()
-        m.addAction("Windows 탐색기 즐겨찾기 불러오기…", self.import_windows_favorites)
-        m.addAction("즐겨찾기·북마크 백업하기", self.backup_now)
+        m.addAction("백업하기  (북마크 + 모든 설정)", self.backup_now)
         m.addAction("백업에서 불러오기…", self.restore_backup)
         m.addSeparator()
-        c = m.addAction("Windows 기본 우클릭 메뉴 사용 (반디집 등)")
-        c.setCheckable(True)
-        c.setChecked(self.data.get("shell_menu", True))
-        c.triggered.connect(self.toggle_shell_menu)
-        m.addSeparator()
-        e = m.addAction("Win+E 로 JY Explorer 열기 / 활성화")
-        e.setCheckable(True)
-        e.setChecked(self.data.get("win_e", True))
-        e.triggered.connect(self.toggle_win_e)
         r = m.addAction("창을 닫아도 트레이에 상주 (Win+E 로 바로 열기)")
         r.setCheckable(True)
         r.setChecked(self.data.get("resident", True))
@@ -3669,13 +3590,6 @@ class Main(QMainWindow):
         """설정 → 검색 색인: Everything 이 색인한 볼륨/폴더를 보고 폴더 색인을 추가/제거 (없으면 설치 안내)"""
         SUI.IndexDialog(self).exec()
 
-    def toggle_win_e(self):
-        self.data["win_e"] = not self.data.get("win_e", True)
-        self.schedule_save()
-        ok = self.apply_win_e()
-        self.say(("Win+E → JY Explorer" if self.data["win_e"] else "Win+E → Windows 탐색기 (원래대로)")
-                 + ("" if ok else "  (키보드 훅 설치 실패)"))
-
     def toggle_resident(self):
         self.data["resident"] = not self.data.get("resident", True)
         self.schedule_save()
@@ -3689,34 +3603,50 @@ class Main(QMainWindow):
         except OSError as ex:
             self.say("실패: " + str(ex))
 
-    def toggle_shell_menu(self):
-        self.data["shell_menu"] = not self.data.get("shell_menu", True)
-        self.schedule_save()
-        self.say("Windows 기본 우클릭 메뉴 " + ("사용" if self.data["shell_menu"] else "끔 (간단 메뉴)"))
-
-    # ---- 백업 / 복원 / Windows 즐겨찾기 가져오기 ----
+    # ---- 백업 / 복원 (북마크 + 설정 전체를 zip 하나로) ----
     def backup_now(self, tag=""):
-        """북마크·빠른 이동 설정을 오늘 날짜를 붙여 backup 폴더에 저장 (현재 설정 파일은 그대로 둠)"""
+        """북마크와 설정 전체를 날짜/시각이 붙은 zip 으로 backup 폴더에 저장 (90일 지난 백업은 자동 삭제)"""
         self.save_bookmarks()
         self.save_session()
-        d = backup_favorites(tag)
+        dest = backup_favorites(tag)
         if not tag:
-            self.say("백업 완료: " + str(d))
-        return d
+            self.say("백업 완료: " + dest.name + "  (backup 폴더)")
+        return dest
 
     def restore_backup(self):
         path, _ = QFileDialog.getOpenFileName(self, "백업에서 불러오기", str(BACKUP_DIR),
-                                              "북마크 백업 (bookmarks_*.json);;모든 JSON (*.json)")
+                                              "JY Explorer 백업 (*.zip);;예전 북마크 백업 (bookmarks_*.json)")
         if not path:
             return
+        if not path.lower().endswith(".zip"):
+            self._restore_legacy(path)
+            return
+        try:
+            bm, ex = read_backup(path)
+        except ValueError as e:
+            QMessageBox.warning(self, "불러올 수 없음", str(e))
+            return
+        if QMessageBox.question(self, "백업에서 불러오기",
+                                f"북마크와 모든 설정을\n{Path(path).name}\n내용으로 되돌립니다.\n\n"
+                                "현재 상태는 먼저 자동으로 백업되고, 되돌린 뒤 프로그램이 다시 시작됩니다.\n\n계속할까요?") != QMessageBox.Yes:
+            return
+        self.backup_now("_복원전")
+        ex["fav_sync_snapshot"] = None                        # 복원 후 첫 동기화는 합치기만 (지우지 않음)
+        self.bm, self.data = bm, ex
+        save_json(BOOKMARKS_FILE, bm)
+        save_json(EXPLORER_FILE, ex)
+        self.restart_app()
+
+    def _restore_legacy(self, path):
+        """예전 방식(bookmarks_날짜.json + explorer_날짜.json) 백업 불러오기"""
         bm = load_json(path, None)
         if not isinstance(bm, dict) or not isinstance(bm.get("children"), list):
-            QMessageBox.warning(self, "불러올 수 없음", "북마크 백업 파일(bookmarks_날짜.json)을 선택하세요.")
+            QMessageBox.warning(self, "불러올 수 없음", "백업 파일(zip 또는 bookmarks_날짜.json)을 선택하세요.")
             return
         pair = Path(path).with_name(Path(path).name.replace("bookmarks_", "explorer_", 1))
         ex = load_json(pair, None) if pair.exists() and pair != Path(path) else None
-        msg = f"현재 북마크{' 와 빠른 이동' if ex else ''} 을(를)\n{Path(path).name}{' + ' + pair.name if ex else ''}\n내용으로 교체합니다.\n\n현재 내용은 먼저 자동으로 백업됩니다. 계속할까요?"
-        if QMessageBox.question(self, "백업에서 불러오기", msg) != QMessageBox.Yes:
+        if QMessageBox.question(self, "백업에서 불러오기", f"현재 북마크{' 와 빠른 이동' if ex else ''} 을(를) {Path(path).name} 내용으로 "
+                                "교체합니다.\n\n현재 내용은 먼저 자동으로 백업됩니다. 계속할까요?") != QMessageBox.Yes:
             return
         self.backup_now("_복원전")
         self.bm["children"] = bm["children"]
@@ -3728,72 +3658,169 @@ class Main(QMainWindow):
         self.quick_changed()
         self.say("백업에서 불러왔습니다: " + Path(path).name)
 
+    def restart_app(self):
+        """프로그램을 종료한 뒤 2초 뒤에 다시 시작 (복원한 설정을 적용)"""
+        import subprocess
+        if FROZEN:
+            cmd = [sys.executable]
+        else:
+            py = Path(sys.executable).with_name("pythonw.exe")
+            cmd = [str(py if py.exists() else sys.executable), str(Path(__file__).resolve())]
+        line = "ping -n 3 127.0.0.1 >nul & start \"\" " + " ".join(f'"{c}"' for c in cmd)
+        subprocess.Popen(["cmd", "/c", line], creationflags=0x08000000 | 0x00000008, close_fds=True)
+        self._skip_sync_on_quit = True
+        self.quit_app()
+
     def _default_quick_paths(self):
         return {os.path.normcase(os.path.join(HOME, s)) for s in ("Desktop", "Downloads", "Documents", "Pictures")}
 
-    def import_windows_favorites(self):
-        self.say("Windows 즐겨찾기를 읽는 중…")
-
-        def run():
-            try:
-                entries = F.windows_pinned_folders()
-            except Exception as e:
-                entries, err = [], str(e)
-            else:
-                err = ""
-            self._ui.emit(lambda: self._show_import(entries, err))
-        threading.Thread(target=run, daemon=True).start()
-
-    def _show_import(self, entries, err):
-        if not entries:
-            QMessageBox.information(self, "Windows 즐겨찾기", err or "불러올 즐겨찾기(고정된 폴더)가 없습니다.")
+    # ---- 북마크 = Windows 즐겨찾기 동기화 (시작할 때 / 창 닫을 때 / 종료할 때 / 수동) ----
+    def toggle_fav_sync(self, checked):
+        if checked:
+            if QMessageBox.question(self, "Windows 즐겨찾기와 동기화",
+                                    "북마크와 Windows 탐색기 즐겨찾기를 같은 것으로 맞춥니다.\n\n"
+                                    "• 처음에는 양쪽을 합치기만 하고 아무것도 지우지 않습니다.\n"
+                                    "• 이후 프로그램을 켤 때 / 창을 닫을 때 / 종료할 때 / '지금 동기화' 를 누를 때 맞춥니다.\n"
+                                    "• 폴더로 묶은 북마크는 폴더 없이 Windows 에 고정됩니다. 삭제는 항상 백업 후에 합니다.\n\n"
+                                    "동기화를 켤까요?") != QMessageBox.Yes:
+                return
+            self.fav_sync_on = True
+            self.data["fav_sync_on"] = True
+            self.data["fav_sync_snapshot"] = None
+            self.schedule_save()
+            self.run_sync("켜기", manual=True)
             return
-        have_q = {os.path.normcase(c["path"]) for c in self.quick_items} | self._default_quick_paths()
-        have_b = {os.path.normcase(x) for x in self._all_paths(self.bm["children"])}
-        dlg = FavImportDialog(self, entries, have_q, have_b)
-        if not dlg.exec():
+        box = QMessageBox(self)
+        box.setWindowTitle("동기화 끄기")
+        box.setText("동기화를 끕니다. JY Explorer 안의 북마크는 어떻게 할까요?")
+        box.setInformativeText("• 삭제: 북마크와 북마크 폴더를 모두 지웁니다 (세트 북마크는 유지, 지우기 전에 자동 백업).\n"
+                               "• 유지: 지금 북마크를 그대로 두고, 이때부터 동기화만 하지 않습니다.\n"
+                               "Windows 즐겨찾기는 어느 쪽이든 건드리지 않습니다.")
+        delete = box.addButton("북마크 삭제", QMessageBox.DestructiveRole)
+        keep = box.addButton("유지", QMessageBox.AcceptRole)
+        box.addButton("취소 (계속 동기화)", QMessageBox.RejectRole)
+        box.exec()
+        c = box.clickedButton()
+        if c is not delete and c is not keep:
             return
-        chosen, dest, replace = dlg.selected(), dlg.dest.currentIndex(), dlg.replace.isChecked()
-        if not chosen and not replace:
-            return
-        self.backup_now("_가져오기전")          # 가져오기 전에 현재 내용을 항상 백업
-        added = 0
-        if dest == 1:                                # 빠른 이동
-            if replace:
-                self.quick_items.clear()
-            have = {os.path.normcase(c["path"]) for c in self.quick_items} | self._default_quick_paths()
-            for e in chosen:
-                if os.path.normcase(e["path"]) not in have:
-                    self.quick_items.append({"name": e["name"], "path": e["path"], "net": e["path"].startswith("\\\\")})
-                    have.add(os.path.normcase(e["path"]))
-                    added += 1
-            self.quick_changed()
-        else:                                        # 북마크 (왼쪽 트리)
-            if replace:
-                self.bm["children"][:] = [n for n in self._pair_nodes()]      # 세트 북마크는 남기고 일반 북마크만 교체
-            have = {os.path.normcase(x) for x in self._all_paths(self.bm["children"])}
-            for e in chosen:
-                if os.path.normcase(e["path"]) not in have:
-                    self.bm["children"].append({"type": "bookmark", "name": e["name"], "path": e["path"]})
-                    have.add(os.path.normcase(e["path"]))
-                    added += 1
+        if c is delete:
+            self.backup_now("_동기화끄기전")
+            self.bm["children"][:] = self._pair_nodes()
             self.bookmarks_changed()
-        self.say(f"Windows 즐겨찾기 {added}개를 {'빠른 이동' if dest else '북마크'}로 가져왔습니다 (이전 내용은 backup 폴더에 백업됨)")
-
-    def toggle_sync(self):
-        self.sync_fav = not self.sync_fav
-        self.data["sync_fav"] = self.sync_fav
+            self.say("북마크를 삭제했습니다 (백업은 backup 폴더)")
+        self.fav_sync_on = False
+        self.data["fav_sync_on"] = False
+        self.data["fav_sync_snapshot"] = None
         self.schedule_save()
 
-    def sync_all_fav(self):
-        paths = [p for p in self._all_paths(self.bm["children"]) if os.path.isdir(p)]
+    def _jy_map(self):
+        return {FSY.norm(p): p for p in self._all_paths(self.bm["children"])}
 
-        def run():
-            for p in paths:
-                F.pin_home(p)
-            self._ui.emit(lambda: self.say(f"{len(paths)}개를 Windows 즐겨찾기에 등록했습니다"))
-        threading.Thread(target=run, daemon=True).start()
-        self.say("등록 중…")
+    def _sync_excluded(self):
+        return {FSY.norm(p) for p in self._default_quick_paths()}
+
+    def _sync_read_windows(self):
+        entries = F.windows_pinned_folders()
+        return {FSY.norm(e["path"]): e["path"] for e in entries}, {FSY.norm(e["path"]): e["name"] for e in entries}
+
+    def _remove_bookmark_paths(self, keys):
+        """경로가 keys(정규화) 에 있는 일반 북마크를 트리 어디에 있든 삭제"""
+        def walk(kids):
+            for n in list(kids):
+                if n["type"] == "folder":
+                    walk(n["children"])
+                elif not n.get("path2") and FSY.norm(n["path"]) in keys:
+                    kids.remove(n)
+        walk(self.bm["children"])
+
+    def _sync_apply_jy(self, win, names):
+        """(GUI 스레드) 계산 + 북마크 쪽 변경 적용. (계획, 오류 문구)"""
+        snap = self.data.get("fav_sync_snapshot")
+        snap = set(snap) if isinstance(snap, list) else None
+        if snap is not None and len(snap) >= 3 and not win:
+            return None, "Windows 즐겨찾기 목록을 읽지 못했습니다 (동기화 건너뜀)"
+        plan = FSY.plan(win, self._jy_map(), snap, self._sync_excluded())
+        if plan["rm_jy"] or plan["rm_win"]:
+            self.backup_now("_동기화전")                          # 삭제가 있으면 항상 먼저 백업
+        for path in plan["to_jy"]:                              # 폴더 없이 맨 위 단계로 (정리는 직접)
+            self.bm["children"].append({"type": "bookmark", "name": names.get(FSY.norm(path)) or tab_title(path), "path": path})
+        if plan["rm_jy"]:
+            self._remove_bookmark_paths({FSY.norm(x) for x in plan["rm_jy"]})
+        if plan["to_jy"] or plan["rm_jy"]:
+            self.bookmarks_changed()
+        return plan, ""
+
+    def _sync_finish(self, plan, win, ok_pin, ok_unpin, reason, manual):
+        ex = self._sync_excluded()
+        w_after = set(win) | {FSY.norm(x) for x in plan["to_win"] if ok_pin.get(x)}
+        w_after -= {FSY.norm(x) for x in plan["rm_win"] if ok_unpin.get(x)}
+        self.data["fav_sync_snapshot"] = sorted(FSY.new_snapshot(w_after, set(self._jy_map()), ex))
+        self.data["fav_sync_last"] = time.time()
+        self.schedule_save()
+        self.refresh_stars()
+        failed = sum(1 for v in ok_pin.values() if not v) + sum(1 for v in ok_unpin.values() if not v)
+        changed = len(plan["to_jy"]) + len(plan["rm_jy"]) + len(ok_pin) + len(ok_unpin)
+        if changed or manual or plan["skipped_rm"]:
+            msg = (f"동기화({reason}): Windows→북마크 +{len(plan['to_jy'])} −{len(plan['rm_jy'])}"
+                   f",  북마크→Windows +{sum(ok_pin.values())} −{sum(ok_unpin.values())}")
+            if failed:
+                msg += f",  실패 {failed} (다음에 다시 시도)"
+            if plan["skipped_rm"]:
+                msg += ",  삭제가 너무 많아 삭제는 건너뜀"
+            self.say(msg)
+        self._sync_busy = False
+
+    def run_sync(self, reason="", manual=False):
+        """백그라운드로 동기화 (화면은 멈추지 않음). 꺼져 있거나 이미 실행 중이면 무시"""
+        if not self.fav_sync_on or self._sync_busy:
+            return
+        self._sync_busy = True
+
+        def read():
+            try:
+                win, names = self._sync_read_windows()
+                err = ""
+            except Exception as e:
+                win = names = None
+                err = str(e)
+            self._ui.emit(lambda: self._sync_step2(win, names, err, reason, manual))
+        threading.Thread(target=read, daemon=True).start()
+
+    def _sync_step2(self, win, names, err, reason, manual):
+        if win is None:
+            self._sync_busy = False
+            if manual:
+                self.say("Windows 즐겨찾기를 읽지 못했습니다: " + err)
+            return
+        plan, why = self._sync_apply_jy(win, names)
+        if plan is None:
+            self._sync_busy = False
+            self.say(why)
+            return
+
+        def apply_windows():
+            ok_pin = F.pin_many(plan["to_win"])
+            ok_unpin = F.unpin_many(plan["rm_win"])
+            self._ui.emit(lambda: self._sync_finish(plan, win, ok_pin, ok_unpin, reason, manual))
+        threading.Thread(target=apply_windows, daemon=True).start()
+
+    def sync_blocking(self, reason="종료"):
+        """종료 직전용: 끝날 때까지 기다리는 동기화 (실패해도 종료를 막지 않음)"""
+        if not self.fav_sync_on or self._sync_busy or self._skip_sync_on_quit:
+            return
+        self._sync_busy = True
+        try:
+            win, names = self._sync_read_windows()
+            plan, why = self._sync_apply_jy(win, names)
+            if plan is None:
+                return
+            ok_pin = F.pin_many(plan["to_win"])
+            ok_unpin = F.unpin_many(plan["rm_win"])
+            self._sync_finish(plan, win, ok_pin, ok_unpin, reason, False)
+        except Exception:
+            pass
+        finally:
+            self._sync_busy = False
 
     def current_state(self):
         return {"split": self.split_btn.isChecked(), "panes": [p.state() for p in self.panes]}
@@ -3838,8 +3865,10 @@ class Main(QMainWindow):
         if self.data.get("resident", True) and self.tray_ok and not self.quitting:
             e.ignore()          # 창만 닫고 트레이에 상주 → Win+E 로 즉시 다시 열림
             self.hide()
+            self.run_sync("창 닫기")
             return
         self.quitting = True
+        self.sync_blocking("종료")
         if self.hook is not None:
             self.hook.uninstall()
         super().closeEvent(e)
@@ -3948,8 +3977,8 @@ def set_startup(on):
 
 
 def import_favorites_cli():
-    """설치 시 '기존 Windows 탐색기 즐겨찾기 불러오기'를 체크한 경우: 창 없이 빠른 이동으로 추가(기존 내용 유지)"""
-    """(0.1.2부터) 가져온 즐겨찾기는 '빠른 이동'이 아니라 북마크(왼쪽 트리)로 들어감"""
+    """설치 시 'Windows 즐겨찾기와 동기화'를 체크한 경우: 창 없이 Windows 즐겨찾기를 북마크로 불러오고(기존 내용 유지)
+    동기화를 켬. 이후 북마크→Windows 방향은 프로그램을 처음 켤 때 첫 동기화가 맞춤"""
     data = load_json(EXPLORER_FILE, {})
     backup_favorites("_설치전")
     bm = load_json(BOOKMARKS_FILE, {"children": []})
@@ -3969,6 +3998,8 @@ def import_favorites_cli():
             bm["children"].append({"type": "bookmark", "name": e["name"], "path": e["path"]})
             have.add(k)
     data["quick_migrated"] = True
+    data["fav_sync_on"] = True
+    data["fav_sync_snapshot"] = None
     save_json(BOOKMARKS_FILE, bm)
     save_json(EXPLORER_FILE, data)
 

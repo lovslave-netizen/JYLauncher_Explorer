@@ -384,6 +384,46 @@ def unpin_home(path):
     return r.returncode == 0
 
 
+def pin_many(paths):
+    """여러 폴더를 PowerShell 한 번으로 '빠른 실행'에 고정 → {경로: 성공 여부}"""
+    import json
+    if not paths:
+        return {}
+    ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+          "$paths=ConvertFrom-Json $env:JY_PATHS; $sh=New-Object -ComObject Shell.Application; $res=@{};"
+          "foreach($p in $paths){ try { $sh.Namespace($p).Self.InvokeVerb('pintohome'); $res[$p]=$true } catch { $res[$p]=$false } };"
+          "ConvertTo-Json -InputObject $res -Compress")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                           env=dict(os.environ, JY_PATHS=json.dumps(list(paths), ensure_ascii=False)),
+                           timeout=60 + 3 * len(paths), creationflags=0x08000000)
+        data = json.loads(r.stdout.decode("utf-8", "ignore").strip() or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {p: False for p in paths}
+    return {p: bool(data.get(p, False)) for p in paths}
+
+
+def unpin_many(paths):
+    """여러 폴더를 PowerShell 한 번으로 '빠른 실행'에서 고정 해제 → {경로: 성공 여부} (원래 고정돼 있지 않았으면 성공으로 봄)"""
+    import json
+    if not paths:
+        return {}
+    ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+          "$paths=ConvertFrom-Json $env:JY_PATHS; $want=@{}; foreach($p in $paths){ $want[$p.ToLower()]=$p }; $res=@{};"
+          f"$q=(New-Object -ComObject Shell.Application).Namespace('{QUICK_ACCESS}');"
+          "foreach($i in @($q.Items())){ if($i.Path -and $want.ContainsKey($i.Path.ToLower())){ "
+          "try { $i.InvokeVerb('unpinfromhome'); $res[$want[$i.Path.ToLower()]]=$true } catch { $res[$want[$i.Path.ToLower()]]=$false } } };"
+          "ConvertTo-Json -InputObject $res -Compress")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                           env=dict(os.environ, JY_PATHS=json.dumps(list(paths), ensure_ascii=False)),
+                           timeout=60 + 3 * len(paths), creationflags=0x08000000)
+        data = json.loads(r.stdout.decode("utf-8", "ignore").strip() or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {p: False for p in paths}
+    return {p: bool(data.get(p, True)) for p in paths}
+
+
 def is_pinned(path):
     p = os.path.normcase(os.path.normpath(path)).replace("'", "''")
     r = _ps(f"$q=(New-Object -ComObject Shell.Application).Namespace('{QUICK_ACCESS}');"

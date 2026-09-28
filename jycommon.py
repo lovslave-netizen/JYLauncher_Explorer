@@ -216,15 +216,56 @@ def create_app_shortcuts(where, folder=None):
 BACKUP_DIR = DATA_DIR / "backup"      # 즐겨찾기/북마크 백업 폴더
 
 
+BACKUP_KEEP_DAYS = 90
+
+
 def backup_favorites(tag=""):
-    """북마크(bookmarks.json)와 탐색기 설정(explorer.json: 빠른 이동 등)을 오늘 날짜를 붙여 backup 폴더에 복사.
-    같은 날짜 파일이 이미 있으면 시각을 덧붙임. 저장한 폴더 경로를 돌려줌"""
+    """북마크(bookmarks.json)와 탐색기 설정 전체(explorer.json)를 zip 하나로 backup 폴더에 저장하고 그 경로를 돌려줌.
+    파일 이름에 날짜/시각이 들어가고, 90일이 지난 백업(예전 json 백업 포함)은 자동으로 지움."""
     import time as _t
+    import zipfile
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = _t.strftime("%Y-%m-%d") + tag
-    if (BACKUP_DIR / f"bookmarks_{stamp}.json").exists() or (BACKUP_DIR / f"explorer_{stamp}.json").exists():
-        stamp += _t.strftime("_%H%M%S")
-    for src, prefix in ((BOOKMARKS_FILE, "bookmarks"), (EXPLORER_FILE, "explorer")):
-        if src.exists():
-            shutil.copy2(src, BACKUP_DIR / f"{prefix}_{stamp}.json")
-    return BACKUP_DIR
+    stamp = _t.strftime("%Y-%m-%d_%H%M%S")
+    dest = BACKUP_DIR / f"JYExplorer_백업_{stamp}{tag}.zip"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = BACKUP_DIR / f"JYExplorer_백업_{stamp}{tag}_{n}.zip"
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+        for src, name in ((BOOKMARKS_FILE, "bookmarks.json"), (EXPLORER_FILE, "explorer.json")):
+            if src.exists():
+                zf.write(src, name)
+    cleanup_backups()
+    return dest
+
+
+def cleanup_backups(days=BACKUP_KEEP_DAYS):
+    """backup 폴더에서 days 일이 지난 파일 삭제 (프로그램을 켤 때와 백업할 때 호출)"""
+    import time as _t
+    limit = _t.time() - days * 86400
+    try:
+        for f in BACKUP_DIR.iterdir():
+            if f.is_file() and f.stat().st_mtime < limit:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def read_backup(path):
+    """백업 zip → (bookmarks 딕셔너리, explorer 설정 딕셔너리). 형식이 맞지 않으면 ValueError"""
+    import json
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            bm = json.loads(zf.read("bookmarks.json").decode("utf-8")) if "bookmarks.json" in names else {"children": []}
+            ex = json.loads(zf.read("explorer.json").decode("utf-8")) if "explorer.json" in names else {}
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
+        raise ValueError(f"백업 파일을 읽을 수 없습니다: {e}")
+    if not isinstance(bm, dict) or not isinstance(bm.get("children", []), list) or not isinstance(ex, dict):
+        raise ValueError("백업 파일의 내용이 올바르지 않습니다")
+    bm.setdefault("children", [])
+    return bm, ex

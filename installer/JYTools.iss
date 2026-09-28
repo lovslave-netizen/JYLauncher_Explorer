@@ -1,4 +1,4 @@
-; JY Tools 설치 프로그램 (Inno Setup 6)
+﻿; JY Tools 설치 프로그램 (Inno Setup 6)
 ;
 ; 빌드:  프로젝트 폴더에서 .\build.ps1 -Installer
 ;        (내부적으로 pyinstaller --noconfirm --clean JYTools.spec → ISCC /DAppVersion=x.y.z installer\JYTools.iss)
@@ -12,7 +12,7 @@
 ;   - 조용한 설치(/SILENT)에서는 /RELAUNCH=launcher,explorer 로 지정한 프로그램을 설치 후 다시 실행
 
 #ifndef AppVersion
-  #define AppVersion "0.1.9"
+  #define AppVersion "0.1.10"
 #endif
 #define AppName "JY Tools"
 #define AppIdGuid "7A3C1E52-4B8D-4F6A-9C21-5D0E8B7F3A10"
@@ -43,7 +43,7 @@ Name: "launcher"; Description: "JY Launcher (런처)"; Types: full
 Name: "explorer"; Description: "JY Explorer (탐색기)"; Types: full
 
 [Tasks]
-Name: "importfav"; Description: "Windows 탐색기의 기존 즐겨찾기를 JY Explorer '빠른 이동'으로 불러오기 (기존 내용은 유지되고 자동 백업됩니다)"; Components: explorer
+Name: "importfav"; Description: "JY Explorer 북마크를 Windows 즐겨찾기와 동기화 (처음에 Windows 즐겨찾기를 북마크로 불러오고, 이후 켜고 끌 때 자동으로 맞춥니다. 기존 내용은 유지되고 자동 백업됩니다)"; Components: explorer
 Name: "startup"; Description: "Windows 시작 시 런처 자동 실행 (트레이 상주, Ctrl+Alt+L 로 호출)"; Components: launcher
 Name: "startup_explorer"; Description: "Windows 시작 시 탐색기도 자동 실행 (트레이 상주, Win+E 로 JY Explorer 열기)"; Components: explorer
 Name: "ctxmenu"; Description: "Windows 탐색기 우클릭 메뉴에 '런처에 추가' 넣기"; Components: launcher
