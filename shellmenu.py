@@ -84,6 +84,7 @@ class ShellMenu:
         """paths: 같은 폴더 안의 선택 항목들 / 없으면 folder 배경 메뉴. extended: Shift+우클릭(추가 명령)"""
         self.hmenu = None
         self.ctx = None
+        self._bitmaps = []
         self.workdir = folder
         desktop = shell.SHGetDesktopFolder()
         try:
@@ -125,11 +126,19 @@ class ShellMenu:
             except Exception:
                 continue
 
-    def _is_sep(self, i):
+    def _info(self, i):
+        """(fType, 글자) — pywin32 의 GetMenuItemInfo 는 버퍼를 받아야 해서 win32gui_struct 로 풀어 씀. 실패하면 (0, '')"""
         try:
-            return bool(win32gui.GetMenuItemInfo(self.hmenu, i, True)[0] & win32con.MFT_SEPARATOR)
+            import win32gui_struct
+            buf, _extras = win32gui_struct.EmptyMENUITEMINFO(win32con.MIIM_FTYPE | win32con.MIIM_STRING)
+            win32gui.GetMenuItemInfo(self.hmenu, i, True, buf)
+            info = win32gui_struct.UnpackMENUITEMINFO(buf)
+            return info.fType, (info.text or "")
         except Exception:
-            return False
+            return 0, ""
+
+    def _is_sep(self, i):
+        return bool(self._info(i)[0] & win32con.MFT_SEPARATOR)
 
     def remove_verbs(self, verbs):
         """셸 메뉴에서 verb 가 verbs 에 있는 항목을 지움 (우리 항목과 겹치는 '열기', '런처에 추가' 등).
@@ -156,16 +165,80 @@ class ShellMenu:
             win32gui.DeleteMenu(self.hmenu, n - 1, win32con.MF_BYPOSITION)
         return removed
 
+    def _set_icon(self, hmenu, pos, icon):
+        """메뉴 항목 앞에 아이콘을 붙임. icon = (너비, 높이, BGRA 미리곱셈 바이트) — 실패해도 글자만 나옴"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class MII(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.UINT), ("fMask", wintypes.UINT), ("fType", wintypes.UINT), ("fState", wintypes.UINT),
+                            ("wID", wintypes.UINT), ("hSubMenu", wintypes.HANDLE), ("hbmpChecked", wintypes.HANDLE),
+                            ("hbmpUnchecked", wintypes.HANDLE), ("dwItemData", ctypes.c_size_t), ("dwTypeData", wintypes.LPWSTR),
+                            ("cch", wintypes.UINT), ("hbmpItem", wintypes.HANDLE)]
+            w, h, data = icon
+            gdi = ctypes.windll.gdi32
+            gdi.CreateBitmap.restype = wintypes.HANDLE
+            hbmp = gdi.CreateBitmap(w, h, 1, 32, data)
+            if not hbmp:
+                return
+            self._bitmaps.append(hbmp)
+            mii = MII()
+            mii.cbSize = ctypes.sizeof(MII)
+            mii.fMask = 0x80                            # MIIM_BITMAP
+            mii.hbmpItem = hbmp
+            ctypes.windll.user32.SetMenuItemInfoW(wintypes.HANDLE(hmenu), pos, True, ctypes.byref(mii))
+        except Exception:
+            pass
+
+    def remove_texts(self, names):
+        """글자가 names 중 하나인 항목(하위 메뉴 포함)을 지움. 단축 글자 '(N)', 앰퍼샌드, 탭 뒤 글자는 무시하고 비교.
+        예: '새 폴더(N)' → '새 폴더'. 우리 '새로 만들기' 와 겹치는 Windows 항목을 없앨 때 씀 (add_custom 보다 먼저 호출)"""
+        import re
+        want = {n.lower() for n in names}
+        removed = 0
+        for i in range(win32gui.GetMenuItemCount(self.hmenu) - 1, -1, -1):
+            text = self._info(i)[1]
+            key = re.sub(r"\(&?.\)\s*$", "", text.split("\t")[0].replace("&", "")).strip().lower()
+            if key in want:
+                win32gui.DeleteMenu(self.hmenu, i, win32con.MF_BYPOSITION)
+                removed += 1
+        if removed:                                       # 남은 연속/맨 앞/맨 뒤 구분선 정리
+            i, prev_sep = 0, True
+            while i < win32gui.GetMenuItemCount(self.hmenu):
+                sep = self._is_sep(i)
+                if sep and prev_sep:
+                    win32gui.DeleteMenu(self.hmenu, i, win32con.MF_BYPOSITION)
+                    continue
+                prev_sep = sep
+                i += 1
+            n = win32gui.GetMenuItemCount(self.hmenu)
+            if n and self._is_sep(n - 1):
+                win32gui.DeleteMenu(self.hmenu, n - 1, win32con.MF_BYPOSITION)
+        return removed
+
     def add_custom(self, items):
-        """메뉴 맨 위에 사용자 항목을 넣음. items: [(id, 글자) | None(구분선)]. 마지막에 구분선 자동 추가"""
+        """메뉴 맨 위에 사용자 항목을 넣음. items: [(id, 글자[, 아이콘]) | ("sub", 글자, [(id, 글자[, 아이콘]) …][, 아이콘]) | None(구분선)].
+        ("sub" 은 하위 메뉴.) 마지막에 구분선 자동 추가"""
         pos = 0
         for it in items:
             if it is None:
                 win32gui.InsertMenu(self.hmenu, pos, win32con.MF_BYPOSITION | win32con.MF_SEPARATOR, 0, None)
+            elif it[0] == "sub":
+                hsub = win32gui.CreatePopupMenu()
+                for k, child in enumerate(it[2]):
+                    win32gui.InsertMenu(hsub, k, win32con.MF_BYPOSITION | win32con.MF_STRING, child[0], child[1].replace("&", "&&"))
+                    if len(child) > 2 and child[2]:
+                        self._set_icon(hsub, k, child[2])
+                win32gui.InsertMenu(self.hmenu, pos, win32con.MF_BYPOSITION | win32con.MF_POPUP | win32con.MF_STRING, hsub,
+                                    it[1].replace("&", "&&"))
+                if len(it) > 3 and it[3]:
+                    self._set_icon(self.hmenu, pos, it[3])
             else:
-                cid, text = it
-                win32gui.InsertMenu(self.hmenu, pos, win32con.MF_BYPOSITION | win32con.MF_STRING, cid,
-                                    text.replace("&", "&&"))
+                win32gui.InsertMenu(self.hmenu, pos, win32con.MF_BYPOSITION | win32con.MF_STRING, it[0],
+                                    it[1].replace("&", "&&"))
+                if len(it) > 2 and it[2]:
+                    self._set_icon(self.hmenu, pos, it[2])
             pos += 1
         win32gui.InsertMenu(self.hmenu, pos, win32con.MF_BYPOSITION | win32con.MF_SEPARATOR, 0, None)
 
@@ -209,6 +282,13 @@ class ShellMenu:
         self.ctx.InvokeCommand((0, hwnd or _owner(), cmd - FIRST, None, self.workdir, win32con.SW_SHOWNORMAL, 0, 0))
 
     def close(self):
+        for hb in self._bitmaps:
+            try:
+                import ctypes
+                ctypes.windll.gdi32.DeleteObject(hb)
+            except Exception:
+                pass
+        self._bitmaps = []
         if self.hmenu:
             try:
                 win32gui.DestroyMenu(self.hmenu)

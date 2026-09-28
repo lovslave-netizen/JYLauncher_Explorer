@@ -77,6 +77,45 @@ def main():
     w.open_search("all")
     pump()
     assert w.active_view().search_page is page              # 이미 검색 탭이면 재사용
+
+    # 검색 결과의 폴더는 같은 탭 안에서 들어가고, ◀ 뒤로 = 검색 결과로 복귀 (탭이 늘어나지 않음)
+    page.query.setText("deep")
+    wait_for(lambda: page.tree.topLevelItemCount() >= 1, "폴더 검색 결과")
+    n_tabs = w.active.tabbar.count()
+    folder_row = [r for r in page.tree.selected_results() or [page.tree.current_result()] if r][0]
+    w.open_search_result(w.active, folder_row[0], True)
+    pump(300)
+    v = w.active_view()
+    assert w.active.tabbar.count() == n_tabs and v.search_page is None and v.suspended_search is page
+    assert os.path.normcase(v.path) == os.path.normcase(folder_row[0])
+    v.back()                                                # ◀
+    pump(300)
+    assert v.search_page is page and v.suspended_search is None and page.query.text() == "deep"
+    assert w.search_box.text() == "deep"                    # 도구줄 검색창이 검색 탭과 같은 검색어를 보여줌
+    # 도구줄 검색창에 입력 → 검색 탭에서 바로 검색
+    w.search_box.setText("report")
+    wait_for(lambda: page.query.text() == "report" and page.tree.topLevelItemCount() >= 1, "도구줄 검색창 입력 반영")
+    assert w.active.tabbar.count() == n_tabs
+
+    # 새로 만들기: 형식 목록 + 파일/바로 가기 만들기
+    import newmenu
+    types = newmenu.list_types()
+    assert any(t["ext"] == ".txt" for t in types) and any(t["ext"] == ".ahk" for t in types)
+    txt = next(t for t in types if t["ext"] == ".txt")
+    made = newmenu.create_file(root, txt)
+    assert os.path.exists(made) and made.endswith(".txt")
+    made2 = newmenu.create_file(root, txt)
+    assert made2 != made and os.path.exists(made2)                     # 이름 겹치면 (2)
+    url = newmenu.create_shortcut(root, "https://example.com/a")
+    assert url and url.endswith(".url") and "URL=https://example.com/a" in open(url, encoding="utf-8").read()
+    # 윈도우 메뉴에 하위 메뉴 + 아이콘 넣기 (열지는 않고 만들기만)
+    import shellmenu as SM
+    m = SM.ShellMenu([], root)
+    icon = w._menu_icon(w._new_items(w.active_view())[0][1])
+    m.add_custom([("sub", "새로 만들기", [(SM.CUSTOM_BASE, "폴더", icon), (SM.CUSTOM_BASE + 1, "텍스트", None)])])
+    import win32gui
+    assert win32gui.GetSubMenu(m.hmenu, 0) != 0
+    m.close()
     w.save_session()
     print("explorer smoke OK", flush=True)
 
