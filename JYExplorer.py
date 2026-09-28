@@ -60,6 +60,8 @@ QLabel#status { color: #9aa0c4; font-size: 12px; }
 QLineEdit { background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
     padding: 6px 12px; selection-background-color: #7c8cff; }
 QLineEdit:focus { border: 1px solid #7c8cff; background: rgba(124,140,255,0.10); }
+QAbstractItemView QLineEdit { background: #262a4a; border: 1px solid #7c8cff; border-radius: 4px; padding: 0 4px; }
+QAbstractItemView QLineEdit:focus { background: #262a4a; border: 1px solid #7c8cff; }
 QPushButton, QToolButton { background: rgba(255,255,255,0.07); border: none; border-radius: 9px; padding: 6px 12px; }
 QPushButton:hover, QToolButton:hover { background: rgba(255,255,255,0.15); }
 QPushButton:checked { background: #5b6cff; }
@@ -201,9 +203,14 @@ class FileView(QTreeView):
     keyAction = Signal(str)
     selectionSummary = Signal()
 
+    COLS = {0: 420, 1: 100, 2: 140, 3: 160}      # 열 너비 (모든 탭 공용, 사용자가 바꾸면 explorer.json 에 저장)
+    on_cols_changed = None
+
     def __init__(self, path, show_hidden=False):
         super().__init__()
         self.pinned = False
+        self._filter = []
+        self._edit_closed = 0.0
         self.hist, self.hi = [], -1
         self.path = ""
         self.model_ = FSModel(self)
@@ -226,13 +233,27 @@ class FileView(QTreeView):
         self.doubleClicked.connect(self.activate)
         self.setExpandsOnDoubleClick(False)
         h = self.header()
-        h.setStretchLastSection(False)
-        h.setSectionResizeMode(0, QHeaderView.Stretch)
-        for c, w in ((1, 90), (2, 110), (3, 150)):
-            h.setSectionResizeMode(c, QHeaderView.Fixed)
+        h.setStretchLastSection(True)
+        h.setSectionsMovable(False)
+        h.setMinimumSectionSize(40)
+        for c, w in self.COLS.items():          # 모든 열을 마우스로 늘이고 줄일 수 있음
+            h.setSectionResizeMode(c, QHeaderView.Interactive)
             h.resizeSection(c, w)
+        h.sectionResized.connect(self._col_resized)
         self.sortByColumn(0, Qt.AscendingOrder)
+        # 이름 검색: 폴더 표시 방식 대신 행을 숨김 → 목록이 (비동기로) 채워지거나 바뀔 때마다 다시 적용
+        for sig in (self.model_.rowsInserted, self.model_.layoutChanged, self.model_.directoryLoaded):
+            sig.connect(self._schedule_filter)
+        self._filter_t = QTimer(self, singleShot=True, interval=0)
+        self._filter_t.timeout.connect(self._apply_filter)
+        self.itemDelegate().closeEditor.connect(lambda *_: setattr(self, "_edit_closed", time.monotonic()))
         self.navigate(path)
+
+    def _col_resized(self, col, _old, new):
+        if col < 3 and new != self.COLS[col]:        # 마지막 열은 남는 폭을 채우므로 저장하지 않음
+            FileView.COLS[col] = new
+            if FileView.on_cols_changed:
+                FileView.on_cols_changed()
 
     def set_hidden(self, on):
         f = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.System
@@ -254,6 +275,7 @@ class FileView(QTreeView):
                 self.hist.append(path)
             self.hi = len(self.hist) - 1
         self.clearSelection()
+        self._filter_t.start()          # 검색어가 있으면 새 폴더에도 적용, 없으면 예전에 숨긴 행을 되살림
         self.pathChanged.emit(path)
         return True
 
@@ -277,8 +299,30 @@ class FileView(QTreeView):
             self.navigate(parent)
 
     def set_filter(self, text):
-        self.model_.setNameFilterDisables(False)
-        self.model_.setNameFilters([f"*{text}*"] if text else [])
+        """이름에 검색어가 '포함'된 항목만 표시 (대소문자 무시, 폴더도 포함, 공백으로 여러 단어 = 모두 포함)"""
+        self._filter = text.lower().split()
+        self._apply_filter()
+
+    def _schedule_filter(self, *_):
+        if self._filter or self._hidden_by_filter:
+            self._filter_t.start()
+
+    _hidden_by_filter = False
+
+    def _apply_filter(self):
+        root = self.rootIndex()
+        model = self.model_
+        words = self._filter
+        for r in range(model.rowCount(root)):
+            name = model.index(r, 0, root).data(Qt.DisplayRole) or ""
+            low = name.lower()
+            self.setRowHidden(r, root, bool(words) and not all(w in low for w in words))
+        self._hidden_by_filter = bool(words)
+        self.selectionSummary.emit()
+
+    def visible_count(self):
+        root = self.rootIndex()
+        return sum(1 for r in range(self.model_.rowCount(root)) if not self.isRowHidden(r, root))
 
     def selected_paths(self):
         seen, out = set(), []
@@ -319,6 +363,10 @@ class FileView(QTreeView):
     def keyPressEvent(self, e):
         k, m = e.key(), e.modifiers()
         ctrl, shift = bool(m & Qt.ControlModifier), bool(m & Qt.ShiftModifier)
+        if k in (Qt.Key_Return, Qt.Key_Enter) and (self.state() == QAbstractItemView.EditingState
+                                                   or time.monotonic() - self._edit_closed < 0.4):
+            e.accept()          # 이름 바꾸기 입력을 확정한 Enter 가 '실행'으로 이어지지 않게
+            return
         if k in (Qt.Key_Return, Qt.Key_Enter) and not (ctrl or shift):
             for p in (self.selected_paths() or []):
                 if os.path.isdir(p) and len(self.selected_paths()) == 1:
@@ -1276,6 +1324,14 @@ class Main(QMainWindow):
         self.setWindowTitle("JY Explorer")
         self.resize(1400, 860)
         self.data = load_json(EXPLORER_FILE, {})
+        for c, w in self.data.get("col_widths", {}).items():      # 열 너비 복원 (json 키는 문자열)
+            if str(c).isdigit() and int(c) in FileView.COLS and isinstance(w, int) and 40 <= w <= 3000:
+                FileView.COLS[int(c)] = w
+
+        def cols_changed():
+            self.data["col_widths"] = dict(FileView.COLS)
+            self.schedule_save()
+        FileView.on_cols_changed = cols_changed
         self.show_hidden = self.data.get("show_hidden", False)
         self.sync_fav = self.data.get("sync_fav", True)
         self.bm = load_json(BOOKMARKS_FILE, {"children": []})
@@ -1555,7 +1611,7 @@ class Main(QMainWindow):
         if not v:
             return
         sel = v.selected_paths()
-        total = v.model_.rowCount(v.rootIndex())
+        total = v.visible_count()
         s = (f"[{self.active.side} 패널]   " if self.split_btn.isChecked() else "") + f"{total:,}개 항목"
         if sel:
             size = 0
