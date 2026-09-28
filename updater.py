@@ -17,7 +17,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtNetwork import QLocalSocket
 from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
@@ -117,6 +117,7 @@ class Updater(QObject):
         self.state = load_json(STATE_FILE, {})
         self.available = None
         self.busy = False
+        self._prompted = False
         self.widget = self.tray = self.action = None
         self._found.connect(self._on_found)
         self._failed.connect(self._on_failed)
@@ -174,10 +175,25 @@ class Updater(QObject):
             return
         self.state = load_json(STATE_FILE, {})
         if time.time() - self.state.get("last_check", 0) < CHECK_INTERVAL:
-            if self.available:
+            if self.available:                 # 최근에 이미 확인했고 새 버전이 있음 → 실행할 때마다 다시 물어봄
                 self._refresh_action()
+                self._auto_prompt()
             return
         self.check(manual=False)
+
+    def _auto_prompt(self):
+        """프로그램을 켰을 때 새 버전이 있으면 '업데이트하시겠습니까?' 를 바로 물어봄.
+        런처와 탐색기가 동시에 뜨면 창이 두 번 뜨지 않게, 런처가 떠 있으면 탐색기는 물어보지 않음"""
+        if self._prompted or not self.available or not self.can_install:
+            return
+        if self.me != "launcher":
+            s = QLocalSocket()
+            s.connectToServer(SERVER_NAMES["launcher"])
+            if s.waitForConnected(300):
+                s.disconnectFromServer()
+                return
+        self._prompted = True
+        self.prompt_install()
 
     def check(self, manual=True):
         if self.busy:
@@ -206,8 +222,10 @@ class Updater(QObject):
         elif info:
             if manual:
                 self.prompt_install()
+            elif self.can_install:
+                self._auto_prompt()
             else:
-                self._notify(f"새 버전 {info['version']} 이(가) 있습니다. 클릭하면 설치합니다.")
+                self._notify(f"새 버전 {info['version']} 이(가) 있습니다.")
         elif manual:
             QMessageBox.information(self.widget, "업데이트 확인", f"최신 버전입니다. (현재 {__version__})")
 
@@ -223,6 +241,7 @@ class Updater(QObject):
             return
         notes = info["notes"][:600] + ("…" if len(info["notes"]) > 600 else "")
         box = QMessageBox(self.widget)
+        box.setWindowFlag(Qt.WindowStaysOnTopHint)         # 창 없이 트레이에만 떠 있을 때도 눈에 띄게
         box.setWindowTitle("업데이트")
         box.setText(f"새 버전 {info['version']} 을(를) 설치할까요?  (현재 {__version__})")
         box.setInformativeText("설치하는 동안 런처와 탐색기가 잠시 종료되었다가 자동으로 다시 시작됩니다.\n"

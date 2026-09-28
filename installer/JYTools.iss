@@ -12,7 +12,7 @@
 ;   - 조용한 설치(/SILENT)에서는 /RELAUNCH=launcher,explorer 로 지정한 프로그램을 설치 후 다시 실행
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 #define AppName "JY Tools"
 #define AppIdGuid "7A3C1E52-4B8D-4F6A-9C21-5D0E8B7F3A10"
@@ -45,6 +45,7 @@ Name: "explorer"; Description: "JY Explorer (탐색기)"; Types: full
 [Tasks]
 Name: "importfav"; Description: "Windows 탐색기의 기존 즐겨찾기를 JY Explorer '빠른 이동'으로 불러오기 (기존 내용은 유지되고 자동 백업됩니다)"; Components: explorer
 Name: "startup"; Description: "Windows 시작 시 런처 자동 실행 (트레이 상주, Ctrl+Alt+L 로 호출)"; Components: launcher
+Name: "startup_explorer"; Description: "Windows 시작 시 탐색기도 자동 실행 (트레이 상주, Win+E 로 JY Explorer 열기)"; Components: explorer
 Name: "ctxmenu"; Description: "Windows 탐색기 우클릭 메뉴에 '런처에 추가' 넣기"; Components: launcher
 Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; Flags: unchecked
 
@@ -63,6 +64,7 @@ Name: "{autodesktop}\JY Explorer"; Filename: "{app}\JYExplorer.exe"; Tasks: desk
 [Registry]
 ; 시작 프로그램 (처음 설치 때만 등록. 제거 시 삭제)
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "JYLauncher"; ValueData: """{app}\JYLauncher.exe"" --background"; Flags: uninsdeletevalue; Tasks: startup; Check: IsFreshInstall
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "JYExplorer"; ValueData: """{app}\JYExplorer.exe"" --background"; Flags: uninsdeletevalue; Tasks: startup_explorer; Check: IsFreshInstall
 ; 앱 설정에서 켠 시작 프로그램도 제거할 때 같이 지움 (값을 새로 만들지는 않음)
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "JYLauncher"; Flags: dontcreatekey uninsdeletevalue
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "JYExplorer"; Flags: dontcreatekey uninsdeletevalue

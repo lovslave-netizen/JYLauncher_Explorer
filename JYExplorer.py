@@ -1505,7 +1505,17 @@ class Main(QMainWindow):
         sc("Ctrl+Shift+D", self.add_pair_bookmark)
         sc("Ctrl+H", self.toggle_hidden)
         sc("F4", lambda: self.switch_pane())
+        sc("F2", self.rename_current)
         sc("Esc", self.on_escape)
+
+    def rename_current(self):
+        """F2: 파일 목록 뷰가 아니라 경로줄/검색창 등에 포커스가 있어도, 창 전체 단축키로 선택 항목 이름 바꾸기 시작
+        (뷰 자체의 EditKeyPressed 는 포커스/편집 가능 여부 판정에 따라 처음에 안 먹힐 때가 있었음)"""
+        v = self.active_view()
+        if not v or v.state() == QAbstractItemView.EditingState or not v.currentIndex().isValid():
+            return
+        v.setFocus()
+        v.start_rename()
 
     def on_escape(self):
         if self.filter.text():
