@@ -89,19 +89,33 @@ class EverythingClient:
         except (OSError, AttributeError):
             self.dll = None
 
-    def blocked_by_elevation(self):
-        """Everything 창은 떠 있는데 메시지가 거부됨(오류 5) = Everything 이 관리자 권한으로 실행 중이라 일반 권한 프로그램은 접속 불가"""
+    @staticmethod
+    def ipc_window():
+        """Everything 의 IPC 창 (검색 창 'EVERYTHING' 이 아니라 트레이 알림 창 'EVERYTHING_TASKBAR_NOTIFICATION' 이 SDK 요청을 받음)"""
         try:
-            u = ctypes.WinDLL("user32", use_last_error=True)
+            u = ctypes.WinDLL("user32")
             u.FindWindowW.restype = wintypes.HWND
-            hwnd = u.FindWindowW("EVERYTHING", None)
-            if not hwnd:
+            return u.FindWindowW("EVERYTHING_TASKBAR_NOTIFICATION", None) or 0
+        except Exception:
+            return 0
+
+    def is_running(self):
+        return bool(self.ipc_window())
+
+    def blocked_by_elevation(self):
+        """Everything 이 관리자 권한으로 떠 있어 일반 권한인 이 프로그램이 검색 요청(WM_COPYDATA)을 보낼 수 없는 상태.
+        판별: IPC 창 소유 프로세스를 열 수 없고(접근 거부) 우리는 관리자가 아님"""
+        try:
+            hwnd = self.ipc_window()
+            if not hwnd or ctypes.windll.shell32.IsUserAnAdmin():
                 return False
-            u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-            u.SendMessageW.restype = ctypes.c_ssize_t
-            ctypes.set_last_error(0)
-            u.SendMessageW(hwnd, 0x400, 401, 0)               # WM_USER + IS_DB_LOADED
-            return ctypes.get_last_error() == 5
+            pid = wintypes.DWORD(0)
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            h = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid.value)          # PROCESS_QUERY_INFORMATION
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return False
+            return ctypes.GetLastError() == 5
         except Exception:
             return False
 
@@ -231,13 +245,27 @@ class Searcher(QObject):
 
     @staticmethod
     def status():
-        """'ready'(사용 가능) | 'elevated'(관리자 권한으로 실행 중이라 접속 불가) | 'not_running'(설치됐지만 꺼져 있음) | 'missing'(설치 안 됨)"""
+        """'ready'(사용 가능) | 'elevated'(관리자 권한으로 실행 중이라 접속 불가) | 'loading'(실행 중이지만 색인을 불러오는 중)
+        | 'not_running'(설치됐지만 꺼져 있음) | 'missing'(설치 안 됨)"""
         c = Searcher.client()
-        if c.available():
-            return "ready"
         if c.blocked_by_elevation():
             return "elevated"
+        if c.available():
+            return "ready"
+        if c.is_running():
+            return "loading"
         return "not_running" if find_everything_exe() else "missing"
+
+    REASONS = {"missing": "Everything 이 설치돼 있지 않습니다",
+               "elevated": "Everything 이 관리자 권한으로 실행 중이라 연결할 수 없습니다 (설정 → 검색 색인 에서 확인)",
+               "loading": "Everything 이 색인을 불러오는 중입니다 (잠시 뒤 다시 검색해 보세요)",
+               "not_running": "Everything 이 실행 중이 아닙니다"}
+
+    @staticmethod
+    def reason():
+        """Everything 을 못 쓰는 이유 (사용자에게 보여줄 문구). 쓸 수 있으면 빈 문자열"""
+        st = Searcher.status()
+        return "" if st == "ready" else Searcher.REASONS.get(st, "")
 
     def cancel(self):
         self._cancel.set()

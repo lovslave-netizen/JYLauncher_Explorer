@@ -6,8 +6,8 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QFileInfo, QObject, Qt, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QFileInfo, QMimeData, QObject, Qt, QUrl, Signal
+from PySide6.QtGui import QDrag, QKeySequence
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFileIconProvider, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
@@ -46,63 +46,148 @@ def ext_icon(path, is_dir):
 
 
 class ResultsTree(QTreeWidget):
-    """검색 결과 목록. 더블클릭/Enter = openRequested(경로, 폴더인지), 우클릭 = menuRequested(경로, 폴더인지, 전역좌표)"""
+    """검색 결과 목록 (탐색기 파일 목록처럼): 이름 / 위치 / 수정한 날짜 / 확장자 / 크기.
+    더블클릭·Enter = 열기, 우클릭 = Windows 우클릭 메뉴(탐색기에서 연결), F2 = 이름 바꾸기, Ctrl+C/X 복사·잘라내기,
+    Del / Shift+Del = 삭제, 끌어서 다른 패널/폴더로 복사·이동."""
     openRequested = Signal(str, bool)
-    menuRequested = Signal(str, bool, object)
-    copyRequested = Signal(list)                 # Ctrl+C: 선택한 결과의 경로 목록
+    menuRequested = Signal(str, bool, object)     # 클릭한 항목 1개 (런처의 간단한 메뉴용)
+    contextRequested = Signal(list, object)       # 선택한 결과 [(경로, 폴더인지)…], 전역 좌표 (탐색기의 Windows 우클릭 메뉴용)
+    copyRequested = Signal(list)                  # Ctrl+C: 선택한 결과의 경로 목록
+    cutRequested = Signal(list)                   # Ctrl+X
+    deleteRequested = Signal(list, bool)          # Del(False) / Shift+Del(True)
     MAX_ROWS = 5000
+    COLS = ("이름", "위치", "수정한 날짜", "확장자", "크기")
+    rename_handler = None                         # (옛 경로, 새 이름) -> 새 경로, 실패하면 None
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setColumnCount(4)
-        self.setHeaderLabels(["이름", "위치", "크기", "수정한 날짜"])
+        self._loading = False
+        self.setColumnCount(len(self.COLS))
+        self.setHeaderLabels(list(self.COLS))
         self.setRootIsDecorated(False)
         self.setUniformRowHeights(True)
         self.setAlternatingRowColors(True)
-        self.setEditTriggers(QTreeWidget.NoEditTriggers)
+        self.setEditTriggers(QTreeWidget.NoEditTriggers)          # 편집은 F2 / 우클릭 '이름 바꾸기' 로만
         self.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.setSortingEnabled(False)
+        self.setDragEnabled(True)
         h = self.header()
         h.setStretchLastSection(False)
         h.setSectionResizeMode(0, QHeaderView.Interactive)
         h.setSectionResizeMode(1, QHeaderView.Stretch)             # 위치 열이 남는 폭을 채움 → 가로 스크롤 없음
-        h.setSectionResizeMode(2, QHeaderView.Interactive)
-        h.setSectionResizeMode(3, QHeaderView.Interactive)
-        for c, w in ((0, 320), (2, 90), (3, 150)):
+        for c in (2, 3, 4):
+            h.setSectionResizeMode(c, QHeaderView.Interactive)
+        for c, w in ((0, 300), (2, 150), (3, 80), (4, 90)):
             h.resizeSection(c, w)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
         self.itemActivated.connect(self._activated)
         self.itemDoubleClicked.connect(self._activated)
+        self.itemChanged.connect(self._item_changed)
 
+    # ---- 키 ----
     def keyPressEvent(self, e):
+        paths = [r[0] for r in self.selected_results() if r]
         if e.matches(QKeySequence.Copy):
-            paths = [r[0] for r in self.selected_results() if r]
             if paths:
                 self.copyRequested.emit(paths)
             return
+        if e.key() == Qt.Key_Delete:                  # Shift+Del 은 Windows 에서 '잘라내기' 표준키이기도 해서 먼저 검사 (= 영구 삭제)
+            if paths:
+                self.deleteRequested.emit(paths, bool(e.modifiers() & Qt.ShiftModifier))
+            return
+        if e.matches(QKeySequence.Cut):
+            if paths:
+                self.cutRequested.emit(paths)
+            return
+        if e.key() == Qt.Key_F2:
+            self.start_rename()
+            return
         super().keyPressEvent(e)
 
+    # ---- 이름 바꾸기 ----
+    def start_rename(self):
+        it = self.currentItem()
+        if it is not None and it.data(0, Qt.UserRole):
+            it.setFlags(it.flags() | Qt.ItemIsEditable)
+            self.editItem(it, 0)
+
+    def _item_changed(self, it, col):
+        if self._loading or col != 0:
+            return
+        d = it.data(0, Qt.UserRole)
+        if not d:
+            return
+        old, is_dir = d
+        new_name = it.text(0).strip()
+        if not new_name or new_name == os.path.basename(old):
+            self._loading = True
+            it.setText(0, os.path.basename(old))
+            self._loading = False
+            return
+        new = self.rename_handler(old, new_name) if self.rename_handler else None
+        self._loading = True
+        try:
+            if new:
+                it.setData(0, Qt.UserRole, (new, is_dir))
+                it.setText(0, os.path.basename(new))
+                it.setText(1, os.path.dirname(new))
+                it.setText(3, "폴더" if is_dir else os.path.splitext(new)[1].lstrip(".").lower())
+                it.setToolTip(0, new)
+                it.setToolTip(1, new)
+            else:                                    # 실패하면 원래 이름으로 되돌림
+                it.setText(0, os.path.basename(old))
+        finally:
+            self._loading = False
+
+    # ---- 끌어서 내보내기 (다른 패널/폴더로 복사·이동) ----
+    def startDrag(self, actions):
+        paths = [r[0] for r in self.selected_results() if r]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+
+    # ---- 내용 ----
     def clear_results(self):
+        self._loading = True
         self.clear()
+        self._loading = False
 
     def add_rows(self, rows):
         room = self.MAX_ROWS - self.topLevelItemCount()
         self.setUpdatesEnabled(False)
+        self._loading = True
         try:
             for r in rows[:max(room, 0)]:
-                it = QTreeWidgetItem([r["name"], os.path.dirname(r["path"]), "" if r["is_dir"] else fmt_size(r["size"]),
-                                      fmt_date(r["mtime"])])
+                ext = "폴더" if r["is_dir"] else os.path.splitext(r["path"])[1].lstrip(".").lower()
+                it = QTreeWidgetItem([r["name"], os.path.dirname(r["path"]), fmt_date(r["mtime"]), ext,
+                                      "" if r["is_dir"] else fmt_size(r["size"])])
                 it.setIcon(0, ext_icon(r["path"], r["is_dir"]))
                 it.setData(0, Qt.UserRole, (r["path"], r["is_dir"]))
                 it.setToolTip(0, r["path"])
                 it.setToolTip(1, r["path"])
                 self.addTopLevelItem(it)
         finally:
+            self._loading = False
             self.setUpdatesEnabled(True)
         if self.currentItem() is None and self.topLevelItemCount():
             self.setCurrentItem(self.topLevelItem(0))
+
+    def prune_missing(self, limit=400):
+        """삭제/이동으로 사라진 파일은 목록에서 뺌 (최대 limit 개까지만 확인)"""
+        self._loading = True
+        try:
+            for i in range(min(self.topLevelItemCount(), limit) - 1, -1, -1):
+                d = self.topLevelItem(i).data(0, Qt.UserRole)
+                if d and not os.path.exists(d[0]):
+                    self.takeTopLevelItem(i)
+        finally:
+            self._loading = False
 
     def current_result(self):
         it = self.currentItem()
@@ -125,7 +210,9 @@ class ResultsTree(QTreeWidget):
             it.setSelected(True)
             self.setCurrentItem(it)
         d = it.data(0, Qt.UserRole)
-        self.menuRequested.emit(d[0], d[1], self.viewport().mapToGlobal(pos))
+        gp = self.viewport().mapToGlobal(pos)
+        self.menuRequested.emit(d[0], d[1], gp)
+        self.contextRequested.emit([r for r in self.selected_results() if r], gp)
 
 
 class IndexDialog(QDialog):
@@ -184,7 +271,8 @@ class IndexDialog(QDialog):
         self.state.setText({"ready": "상태: Everything 연결됨 — 검색 탭에서 색인 전체를 즉시 검색할 수 있습니다",
                             "elevated": "상태: Everything 이 관리자 권한으로 실행 중이라 이 프로그램이 연결할 수 없습니다 "
                                         "(검색 탭을 처음 열 때 자동 설정을 안내합니다)",
-                            "not_running": "상태: Everything 이 실행 중이 아니거나 색인을 불러오는 중입니다",
+                            "loading": "상태: Everything 이 실행 중이지만 색인을 불러오는 중입니다 (잠시 뒤 새로고침)",
+                            "not_running": "상태: Everything 이 실행 중이 아닙니다",
                             "missing": "상태: Everything 이 설치돼 있지 않습니다. 설치하면 색인 목록을 보고 관리할 수 있고 "
                                        "파일 검색이 매우 빨라집니다 (무료, 가벼움)"}[st])
         installed = bool(FS.find_everything_exe())
@@ -315,6 +403,9 @@ class EverythingGuard(QObject):
         st = FS.Searcher.status()
         if st == "ready":
             self.finished.emit(True)
+            return
+        if st == "loading":                                   # 켜져 있고 색인을 불러오는 중 → 잠깐 기다려 봄
+            self._run_bg(lambda: FS.start_everything(25), "Everything 색인을 불러오는 중…")
             return
         if st == "not_running":
             self._run_bg(lambda: FS.start_everything(12), "Everything 을 시작하는 중…")

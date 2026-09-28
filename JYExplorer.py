@@ -819,11 +819,22 @@ class SearchTabPage(QWidget):
         lay.addWidget(self.status)
         self.tree = SUI.ResultsTree()
         self.tree.openRequested.connect(lambda p, d: self.main.open_search_result(self.pane, p, d))
-        self.tree.menuRequested.connect(lambda p, d, pos: self.main.search_result_menu(self.pane, p, d, pos))
+        self.tree.contextRequested.connect(lambda res, pos: self.main.results_menu(self.pane, self, res, pos))
         self.tree.copyRequested.connect(lambda paths: self.main.set_clipboard(paths, False))
+        self.tree.cutRequested.connect(lambda paths: self.main.set_clipboard(paths, True))
+        self.tree.deleteRequested.connect(lambda paths, perm: self.main.delete_results(self, paths, perm))
+        self.tree.rename_handler = self.main.rename_path
+        self.main.runner.finished.connect(self._after_job)
         lay.addWidget(self.tree, 1)
         if root:
             self.set_scope_folder(root)
+
+    def _after_job(self, *_a):
+        """복사/이동/삭제 작업이 끝나면 사라진 파일을 결과에서 뺌"""
+        try:
+            QTimer.singleShot(300, self.tree.prune_missing)
+        except RuntimeError:
+            pass
 
     def set_scope_folder(self, root):
         self.root = root
@@ -872,7 +883,7 @@ class SearchTabPage(QWidget):
         self._note = ""
         if root is None and not self.main.use_everything:
             root = self.root or HOME
-            self._note = "Everything 이 없어 시작 폴더 아래만 검색했습니다"
+            self._note = (FS.Searcher.reason() or "Everything 을 사용할 수 없습니다") + " → 시작 폴더 아래만 직접 검색했습니다 (느림)"
         self.tree.clear_results()
         self.status.setText("검색 중…")
         self._gen = self.searcher.search(text, root, exts, 3000, use_everything=self.main.use_everything)
@@ -2457,6 +2468,10 @@ class Main(QMainWindow):
         """F2: 파일 목록 뷰가 아니라 경로줄/검색창 등에 포커스가 있어도, 창 전체 단축키로 선택 항목 이름 바꾸기 시작
         (뷰 자체의 EditKeyPressed 는 포커스/편집 가능 여부 판정에 따라 처음에 안 먹힐 때가 있었음)"""
         v = self.active_view()
+        if v is not None and v.search_page is not None:          # 검색 탭: 결과 목록의 선택 항목 이름 바꾸기
+            v.search_page.tree.setFocus()
+            v.search_page.tree.start_rename()
+            return
         if not v or v.state() == QAbstractItemView.EditingState or not v.currentIndex().isValid():
             return
         v.setFocus()
@@ -2517,22 +2532,106 @@ class Main(QMainWindow):
         v = pane.add_tab(os.path.dirname(path))
         QTimer.singleShot(600, lambda: v.select_path(path))
 
-    def search_result_menu(self, pane, path, is_dir, pos):
-        m = QMenu(self)
-        m.addAction("열기", lambda: self.open_search_result(pane, path, is_dir))
-        if not is_dir:
-            m.addAction("폴더 위치 열기 (파일 선택)", lambda: self.reveal_in_folder(pane, path))
-        folder = path if is_dir else os.path.dirname(path)
-        m.addAction("폴더를 새 탭에서 열기", lambda: pane.add_tab(folder))
-        if self.other_pane():
-            m.addAction("폴더를 반대편 패널에서 열기", lambda: self.open_in_other(folder))
-        m.addSeparator()
-        m.addAction("복사  (Ctrl+C)", lambda: self.set_clipboard([path], False))
-        m.addAction("경로 복사", lambda: QApplication.clipboard().setText(path))
-        if is_dir:
-            m.addAction("북마크에 추가", lambda: self.add_bookmark(path))
-        m.addAction("런처에 추가", lambda: self.add_to_launcher([path]))
-        m.exec(pos)
+    # ---- 검색 결과 (탐색기 목록처럼 동작) ----
+    def rename_path(self, old, new_name):
+        """검색 결과에서 이름 바꾸기. 성공하면 새 경로, 실패하면 None (사유를 상태줄에 표시)"""
+        if any(c in new_name for c in '\\/:*?"<>|'):
+            self.say('이름에는 \\ / : * ? " < > | 를 쓸 수 없습니다')
+            return None
+        new = os.path.join(os.path.dirname(old), new_name)
+        if os.path.normcase(new) != os.path.normcase(old) and os.path.exists(new):
+            self.say("같은 이름이 이미 있습니다")
+            return None
+        try:
+            os.rename(old, new)
+        except OSError as e:
+            self.say("이름을 바꾸지 못했습니다: " + str(e))
+            return None
+        self.say("이름 변경: " + new_name)
+        return new
+
+    def delete_results(self, page, paths, permanent):
+        self.delete(paths, permanent)
+        QTimer.singleShot(1200, page.tree.prune_missing)
+
+    def results_menu(self, pane, page, results, pos):
+        """검색 결과 우클릭: 일반 탐색기와 같은 Windows 메뉴(반디집 등) + 위쪽에 내 항목. 복사/잘라내기/삭제/이름 바꾸기는 이 프로그램이 처리"""
+        results = [r for r in results if r]
+        if not results:
+            return
+        paths = [p for p, _d in results]
+        single = paths[0] if len(paths) == 1 else None
+        single_dir = bool(single) and results[0][1]
+        other = self.other_pane()
+        actions, items = {}, []
+
+        def add(text, fn):
+            items.append((len(items), text))
+            actions[len(items) - 1] = fn
+
+        def open_all():
+            for p, d in results[:20]:
+                self.open_search_result(pane, p, d)
+        add("열기", open_all)
+        if single and not single_dir:
+            add("폴더 위치 열기 (파일 선택)", lambda: self.reveal_in_folder(pane, single))
+        if single:
+            folder = single if single_dir else os.path.dirname(single)
+            add("폴더를 새 탭에서 열기", lambda: pane.add_tab(folder))
+            if other:
+                add("폴더를 반대편 패널에서 열기", lambda: self.open_in_other(folder))
+        if single_dir:
+            add("북마크에 추가", lambda: self.add_bookmark(single))
+        add("경로 복사", lambda: QApplication.clipboard().setText("\r\n".join(paths)))
+        add("런처에 추가", lambda: self.add_to_launcher(paths))
+        if other and other.view() is not None and other.view().path:
+            dest = other.view().path
+            add("반대편으로 복사", lambda: self.runner.submit("copy", paths, dest))
+            add("반대편으로 이동", lambda: (self.runner.submit("move", paths, dest), QTimer.singleShot(1500, page.tree.prune_missing)))
+
+        if self.data.get("shell_menu", True):
+            try:
+                import shellmenu as SM
+                m = SM.ShellMenu(paths, os.path.dirname(paths[0]), extended=bool(QGuiApplication.keyboardModifiers() & Qt.ShiftModifier))
+                try:
+                    m.remove_verbs({"open", "jylauncheradd"})
+                    m.add_custom([(SM.CUSTOM_BASE + k, t) for k, t in items])
+                    scr = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+                    dpr = scr.devicePixelRatio()
+                    cmd = m.track(pos.x() * dpr, pos.y() * dpr)
+                    if cmd >= SM.CUSTOM_BASE:
+                        actions[cmd - SM.CUSTOM_BASE]()
+                    elif cmd:
+                        verb = m.verb(cmd)
+                        if verb == "copy":
+                            self.set_clipboard(paths, False)
+                        elif verb == "cut":
+                            self.set_clipboard(paths, True)
+                        elif verb == "delete":
+                            self.delete_results(page, paths, False)
+                        elif verb == "rename" and single:
+                            page.tree.start_rename()
+                        elif verb == "paste":
+                            pass
+                        else:
+                            m.invoke(cmd, int(self.winId()))
+                            QTimer.singleShot(1500, page.tree.prune_missing)
+                finally:
+                    m.close()
+                return
+            except Exception:
+                pass                                       # Windows 메뉴를 못 만들면 아래 기본 메뉴
+        menu = QMenu(self)
+        for k, t in items:
+            menu.addAction(t, actions[k])
+        menu.addSeparator()
+        menu.addAction("복사  (Ctrl+C)", lambda: self.set_clipboard(paths, False))
+        menu.addAction("잘라내기  (Ctrl+X)", lambda: self.set_clipboard(paths, True))
+        menu.addAction("삭제  (Del)", lambda: self.delete_results(page, paths, False))
+        if single:
+            menu.addAction("이름 바꾸기  (F2)", page.tree.start_rename)
+            menu.addAction("속성", lambda: self.props(single))
+        menu.exec(pos)
 
 
     def active_view(self):

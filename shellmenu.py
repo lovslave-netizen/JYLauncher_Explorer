@@ -93,10 +93,14 @@ class ShellMenu:
                 if any(len(p) <= 3 and p[1:2] == ":" for p in paths) or not parent or parent == paths[0] \
                         or parent.startswith("\\\\") and parent.count("\\") < 4:
                     raise ShellMenuUnsupported("드라이브/네트워크 루트")
-                ppidl = shell.SHParseDisplayName(parent, 0)[0]
-                pf = desktop.BindToObject(ppidl, None, shell.IID_IShellFolder)
-                children = [pf.ParseDisplayName(0, None, os.path.basename(p))[1] for p in paths]
-                self.ctx = pf.GetUIObjectOf(0, children, shell.IID_IContextMenu, 0)[1]
+                if len({os.path.dirname(p) for p in paths}) == 1:
+                    ppidl = shell.SHParseDisplayName(parent, 0)[0]
+                    pf = desktop.BindToObject(ppidl, None, shell.IID_IShellFolder)
+                    children = [pf.ParseDisplayName(0, None, os.path.basename(p))[1] for p in paths]
+                    self.ctx = pf.GetUIObjectOf(0, children, shell.IID_IContextMenu, 0)[1]
+                else:                                   # 검색 결과처럼 폴더가 제각각이면 절대 경로 PIDL 을 데스크톱 기준으로
+                    pidls = [shell.SHParseDisplayName(p, 0)[0] for p in paths]
+                    self.ctx = desktop.GetUIObjectOf(0, pidls, shell.IID_IContextMenu, 0)[1]
                 self.workdir = parent
             else:
                 if not folder:

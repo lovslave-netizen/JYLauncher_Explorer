@@ -58,6 +58,14 @@ def main():
     page.tree.copyRequested.emit([r[0] for r in page.tree.selected_results()])   # Ctrl+C 경로
     mime = app.clipboard().mimeData()
     assert len(mime.urls()) == 2 and "report" in mime.text()
+    # 결과 목록은 탐색기처럼: 열 순서, 이름 바꾸기(F2 경로), 잘못된 이름은 되돌림
+    assert [page.tree.headerItem().text(i) for i in range(5)] == ["이름", "위치", "수정한 날짜", "확장자", "크기"]
+    it = page.tree.topLevelItem(0)
+    from PySide6.QtCore import Qt
+    old_path = it.data(0, Qt.UserRole)[0]
+    new_path = w.rename_path(old_path, "smoke_renamed" + os.path.splitext(old_path)[1])
+    assert new_path and os.path.exists(new_path) and not os.path.exists(old_path)
+    assert w.rename_path(new_path, "bad:name") is None
     w.open_search("all")
     pump()
     assert w.active_view().search_page is page              # 이미 검색 탭이면 재사용
@@ -77,7 +85,7 @@ def main():
     sp.scope.setCurrentIndex(i)
     lw.goto(3)
     lw.search.setText("report")
-    wait_for(lambda: sp.tree.topLevelItemCount() == 2, "런처 파일 검색 결과 2개")
+    wait_for(lambda: sp.tree.topLevelItemCount() == 1, "런처 파일 검색 결과 1개 (하나는 위에서 이름을 바꿨음)")
     sp.app_btn.setChecked(True)
     wait_for(lambda: sp.apps is not None, "앱 색인 생성 (PowerShell Get-StartApps)", timeout=90)
     print("launcher smoke OK", flush=True)

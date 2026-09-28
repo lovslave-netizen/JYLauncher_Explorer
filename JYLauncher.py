@@ -1528,6 +1528,7 @@ class SearchPage(QWidget):
             root = None
         if root is None and not self._use_everything:
             root = str(Path.home())                    # Everything 없이는 전체 검색이 불가 → 사용자 폴더만
+            self.status.setText((FS.Searcher.reason() or "Everything 을 사용할 수 없습니다") + " → 사용자 폴더만 직접 검색합니다 (느림)")
         self.tree.clear_results()
         self.status.setText("검색 중…")
         self._gen = self.searcher.search(text, root, exts, 2000, use_everything=self._use_everything)
