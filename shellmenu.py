@@ -28,6 +28,21 @@ _WM_INITMENUPOPUP, _WM_DRAWITEM, _WM_MEASUREITEM, _WM_MENUCHAR = 0x0117, 0x002B,
 _state = {"ctx": None, "hwnd": None}
 
 
+def enable_dark_menus():
+    """Windows 네이티브 팝업 메뉴를 다크 모드로 (탐색기의 어두운 색과 맞춤). Windows 10 1903+ / 11 의 비공개 uxtheme 함수
+    (SetPreferredAppMode=ord 135, FlushMenuThemes=ord 136)를 사용 — 실패해도 메뉴는 기존(밝은) 모양으로 정상 동작"""
+    try:
+        import ctypes
+        ux = ctypes.WinDLL("uxtheme")
+        set_mode = ux[135]
+        set_mode.argtypes = [ctypes.c_int]
+        set_mode(2)                 # 2 = ForceDark
+        ux[136]()                   # FlushMenuThemes
+        return True
+    except Exception:
+        return False
+
+
 class ShellMenuUnsupported(Exception):
     pass
 
@@ -105,6 +120,37 @@ class ShellMenu:
                 break
             except Exception:
                 continue
+
+    def _is_sep(self, i):
+        try:
+            return bool(win32gui.GetMenuItemInfo(self.hmenu, i, True)[0] & win32con.MFT_SEPARATOR)
+        except Exception:
+            return False
+
+    def remove_verbs(self, verbs):
+        """셸 메뉴에서 verb 가 verbs 에 있는 항목을 지움 (우리 항목과 겹치는 '열기', '런처에 추가' 등).
+        지운 뒤 맨 앞/맨 뒤/연속된 구분선은 정리. 반드시 add_custom 보다 먼저 호출"""
+        removed = 0
+        for i in range(win32gui.GetMenuItemCount(self.hmenu) - 1, -1, -1):
+            try:
+                cid = win32gui.GetMenuItemID(self.hmenu, i)
+            except Exception:
+                continue
+            if FIRST <= cid < CUSTOM_BASE and self.verb(cid) in verbs:
+                win32gui.DeleteMenu(self.hmenu, i, win32con.MF_BYPOSITION)
+                removed += 1
+        i, prev_sep = 0, True
+        while i < win32gui.GetMenuItemCount(self.hmenu):
+            sep = self._is_sep(i)
+            if sep and prev_sep:
+                win32gui.DeleteMenu(self.hmenu, i, win32con.MF_BYPOSITION)
+                continue
+            prev_sep = sep
+            i += 1
+        n = win32gui.GetMenuItemCount(self.hmenu)
+        if n and self._is_sep(n - 1):
+            win32gui.DeleteMenu(self.hmenu, n - 1, win32con.MF_BYPOSITION)
+        return removed
 
     def add_custom(self, items):
         """메뉴 맨 위에 사용자 항목을 넣음. items: [(id, 글자) | None(구분선)]. 마지막에 구분선 자동 추가"""

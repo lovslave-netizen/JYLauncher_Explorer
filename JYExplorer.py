@@ -248,6 +248,19 @@ class FSModel(QFileSystemModel):
             self.dataChanged.emit(idx.siblingAtColumn(self.N_BASE), idx.siblingAtColumn(self.N_TOTAL - 1), [Qt.DisplayRole])
 
 
+def shift_wheel(view, e):
+    """Shift + 마우스 휠 = 가로 스크롤 (Windows 탐색기와 같은 동작). 처리했으면 True"""
+    if not (e.modifiers() & Qt.ShiftModifier):
+        return False
+    d = e.angleDelta()
+    delta = d.x() or d.y()                     # 플랫폼에 따라 Shift+휠이 x 축으로 오기도 함
+    hb = view.horizontalScrollBar()
+    if delta and hb.maximum() > hb.minimum():
+        hb.setValue(hb.value() - int(delta / 120 * 60))      # 휠 한 칸 = 60px
+    e.accept()
+    return True
+
+
 class FileView(QTreeView):
     pathChanged = Signal(str)
     newTabRequested = Signal(str)
@@ -509,6 +522,10 @@ class FileView(QTreeView):
         return False
 
     # ---- 입력 ----
+    def wheelEvent(self, e):
+        if not shift_wheel(self, e):
+            super().wheelEvent(e)
+
     def keyPressEvent(self, e):
         k, m = e.key(), e.modifiers()
         ctrl, shift = bool(m & Qt.ControlModifier), bool(m & Qt.ShiftModifier)
@@ -1004,7 +1021,7 @@ class Pane(QFrame):
             self.badge.setVisible(split)
         self.setProperty("active", bool(on))
         if self.property("split"):
-            self.badge.setText(f"{self.side} 패널 · 선택됨 (새 탭이 여기에 열림)" if on else f"{self.side} 패널")
+            self.badge.setText(f"{self.side} 패널")            # 선택된 쪽은 테두리/배지 색으로 이미 구분됨
             self.badge.setObjectName("badge" if on else "badgeoff")
             self.badge.adjustSize()
             self.badge.style().unpolish(self.badge)
@@ -1046,6 +1063,7 @@ class QuickList(QListWidget):
         super().__init__()
         self.setFocusPolicy(Qt.NoFocus)
         self.setIconSize(QSize(20, 20))
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.custom = []
         self.names = {}     # 기본 항목(바탕화면/드라이브 등)의 이름 바꾸기 기록 {경로: 이름}
         self.itemClicked.connect(lambda it: self.openPath.emit(it.data(Qt.UserRole), False))
@@ -1062,6 +1080,10 @@ class QuickList(QListWidget):
             else:                                   # 기본 항목(내 PC, 바탕화면, 드라이브 …)도 이름 변경 가능
                 entry = {"name": it.text(), "path": it.data(Qt.UserRole), "builtin": True}
         self.menuAt.emit(entry, self.viewport().mapToGlobal(pos))
+
+    def wheelEvent(self, e):
+        if not shift_wheel(self, e):
+            super().wheelEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MiddleButton:
@@ -1100,14 +1122,17 @@ class QuickList(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
 
-def pair_icon():
-    """세트 북마크(왼쪽/오른쪽 폴더 2개) 아이콘: 폴더 아이콘 두 개를 나란히"""
+def pair_icon(mark=None):
+    """세트 북마크(왼쪽/오른쪽 폴더 2개) 아이콘: 폴더 아이콘 두 개를 나란히 (표시가 있으면 앞에 도형+색)"""
     f = _provider.icon(QFileIconProvider.Folder).pixmap(QSize(18, 18))
-    pm = QPixmap(38, 18)
+    off = 16 if mark else 0
+    pm = QPixmap(38 + off, 18)
     pm.fill(Qt.transparent)
     pt = QPainter(pm)
-    pt.drawPixmap(0, 0, f)
-    pt.drawPixmap(20, 0, f)
+    if mark:
+        pt.drawPixmap(0, 2, mark_pixmap(mark[0], mark[1], 14))
+    pt.drawPixmap(off, 0, f)
+    pt.drawPixmap(off + 20, 0, f)
     pt.end()
     return QIcon(pm)
 
@@ -1241,8 +1266,8 @@ class BookmarksBar(QFrame):
                 b.setToolTip(n["name"] + (f"\n클릭: 안의 북마크 {cnt}개를 탭으로 한 번에 열기\nShift+클릭: 목록 보기"
                                           if self.folder_click_opens else f"\n클릭: 북마크 {cnt}개 목록\n우클릭: 모두 탭으로 열기 등"))
             elif n.get("path2"):                                   # 세트 북마크: 폴더 2개
-                b.setIcon(pair_icon())
-                b.setIconSize(QSize(38, 18))
+                b.setIcon(pair_icon(n.get("mark")))
+                b.setIconSize(QSize(54 if n.get("mark") else 38, 18))
                 b.setToolTip(f"{n['name']}\n왼쪽: {n['path']}\n오른쪽: {n['path2']}\n클릭: 2개 보기로 양쪽 패널에 각각 열기")
                 if not (os.path.exists(n["path"]) and os.path.exists(n["path2"])):
                     b.setStyleSheet("color:#ff9a9a;")
@@ -1475,18 +1500,86 @@ def chevron_icon(kind):
     return pm
 
 
-def tree_icon(kind, base):
-    """[접기 표시] + [폴더 아이콘] 을 한 아이콘으로 합침 (kind: closed/open/none)"""
-    key = (kind, base)
-    if key in _tree_icons:
-        return _tree_icons[key]
-    ch = chevron_icon(kind)
-    pm = QPixmap(36 if base else 14, 18)
+MARK_SHAPES = (("circle", "동그라미"), ("triangle", "세모"), ("square", "네모"), ("diamond", "마름모"), ("star", "별"))
+MARK_COLORS = (("#ff5c5c", "빨강"), ("#ff9f43", "주황"), ("#ffd166", "노랑"), ("#4cd97b", "초록"),
+               ("#4da3ff", "파랑"), ("#b48cff", "보라"))
+
+
+def mark_pixmap(shape, color, size=14):
+    """북마크 구분용 표시(도형 + 색)"""
+    pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     pt = QPainter(pm)
-    pt.drawPixmap(0, 0, ch)
-    if base:
-        pt.drawPixmap(16, 0, _provider.icon(QFileIconProvider.Folder).pixmap(QSize(18, 18)))
+    pt.setRenderHint(QPainter.Antialiasing)
+    pt.setBrush(QColor(color))
+    pt.setPen(QPen(QColor(0, 0, 0, 90), 0.8))
+    m, s = 1.6, size
+    r = QRectF(m, m, s - 2 * m, s - 2 * m)
+    if shape == "circle":
+        pt.drawEllipse(r)
+    elif shape == "square":
+        pt.drawRoundedRect(r, 1.5, 1.5)
+    elif shape == "triangle":
+        pt.drawPolygon(QPolygonF([QPointF(s / 2, m), QPointF(s - m, s - m), QPointF(m, s - m)]))
+    elif shape == "diamond":
+        pt.drawPolygon(QPolygonF([QPointF(s / 2, m), QPointF(s - m, s / 2), QPointF(s / 2, s - m), QPointF(m, s / 2)]))
+    else:                                        # star
+        pts = []
+        for i in range(10):
+            ang = -math.pi / 2 + i * math.pi / 5
+            rad = (s / 2 - m + 0.6) if i % 2 == 0 else (s / 2 - m + 0.6) * 0.45
+            pts.append(QPointF(s / 2 + rad * math.cos(ang), s / 2 + 0.5 + rad * math.sin(ang)))
+        pt.drawPolygon(QPolygonF(pts))
+    pt.end()
+    return pm
+
+
+def section_glyph(key):
+    """트리 섹션 머리글 아이콘: 북마크=별, 최근=시계, 자주 가는 곳=막대 그래프 (직접 그림)"""
+    pm = QPixmap(18, 18)
+    pm.fill(Qt.transparent)
+    pt = QPainter(pm)
+    pt.setRenderHint(QPainter.Antialiasing)
+    col = QColor("#aab4ff")
+    pt.setPen(QPen(col, 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    pt.setBrush(Qt.NoBrush)
+    if key == "bm":
+        pts = []
+        for i in range(10):
+            ang = -math.pi / 2 + i * math.pi / 5
+            rad = 7.6 if i % 2 == 0 else 3.3
+            pts.append(QPointF(9 + rad * math.cos(ang), 9.7 + rad * math.sin(ang)))
+        pt.setBrush(QColor("#ffd166"))
+        pt.setPen(QPen(QColor("#ffd166"), 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        pt.drawPolygon(QPolygonF(pts))
+    elif key == "recent":
+        pt.drawEllipse(QPointF(9, 9), 7, 7)
+        pt.drawPolyline(QPolygonF([QPointF(9, 4.5), QPointF(9, 9), QPointF(12.5, 11)]))
+    else:
+        pt.setPen(Qt.NoPen)
+        pt.setBrush(col)
+        for x, h in ((2.5, 6), (7.5, 11), (12.5, 8.5)):
+            pt.drawRoundedRect(QRectF(x, 16 - h, 3.4, h), 1.2, 1.2)
+    pt.end()
+    return pm
+
+
+def tree_icon(kind, base, mark=None):
+    """트리 항목 아이콘 = [접기 표시 14px][표시(도형+색) 14px][폴더/섹션 아이콘 18px] 을 한 장으로 합침.
+    kind: closed/open/none, base: True(폴더 아이콘) | 섹션 키('bm'/'recent'/'freq') | None(빈 자리), mark: [도형, 색]"""
+    key = (kind, base, tuple(mark) if mark else None)
+    if key in _tree_icons:
+        return _tree_icons[key]
+    pm = QPixmap(46, 18)
+    pm.fill(Qt.transparent)
+    pt = QPainter(pm)
+    pt.drawPixmap(0, 0, chevron_icon(kind))
+    if mark:
+        pt.drawPixmap(14, 2, mark_pixmap(mark[0], mark[1], 14))
+    if base is True:
+        pt.drawPixmap(28, 0, _provider.icon(QFileIconProvider.Folder).pixmap(QSize(18, 18)))
+    elif base:
+        pt.drawPixmap(28, 0, section_glyph(base))
     pt.end()
     _tree_icons[key] = QIcon(pm)
     return _tree_icons[key]
@@ -1515,7 +1608,8 @@ class SideTree(QTreeWidget):
         self.setFocusPolicy(Qt.NoFocus)
         self.setRootIsDecorated(False)
         self.setIndentation(14)
-        self.setIconSize(QSize(36, 18))
+        self.setIconSize(QSize(46, 18))
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)     # 긴 이름은 가로 스크롤(Shift+휠)
         self.setExpandsOnDoubleClick(False)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setDragEnabled(True)
@@ -1551,10 +1645,10 @@ class SideTree(QTreeWidget):
             if sec.childCount() == 0:
                 ph = QTreeWidgetItem(["(비어 있음)"])
                 ph.setFlags(Qt.NoItemFlags)
-                ph.setIcon(0, tree_icon("none", False))
+                ph.setIcon(0, tree_icon("none", None))
                 sec.addChild(ph)
             sec.setExpanded(open_state.get(key, True))
-            sec.setIcon(0, tree_icon("open" if sec.isExpanded() else "closed", False))
+            sec.setIcon(0, tree_icon("open" if sec.isExpanded() else "closed", key))
         self.blockSignals(False)
 
     def _add_nodes(self, parent, kids):
@@ -1568,10 +1662,10 @@ class SideTree(QTreeWidget):
                 self._add_nodes(it, n["children"])
                 it.setToolTip(0, n["name"])
                 it.setExpanded(bool(n.get("open")) and it.childCount() > 0)
-                it.setIcon(0, tree_icon("open" if it.isExpanded() else "closed", True))
+                it.setIcon(0, tree_icon("open" if it.isExpanded() else "closed", True, n.get("mark")))
             else:
                 it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)
-                it.setIcon(0, tree_icon("none", True))
+                it.setIcon(0, tree_icon("none", True, n.get("mark")))
                 it.setToolTip(0, n["name"] + "\n" + n["path"])
                 parent.addChild(it)
 
@@ -1589,10 +1683,10 @@ class SideTree(QTreeWidget):
         if not d:
             return
         if d[0] == "section":
-            it.setIcon(0, tree_icon("open" if on else "closed", False))
+            it.setIcon(0, tree_icon("open" if on else "closed", d[1]))
             self._open[d[1]] = on
         elif d[0] == "bm" and d[1]["type"] == "folder":
-            it.setIcon(0, tree_icon("open" if on else "closed", True))
+            it.setIcon(0, tree_icon("open" if on else "closed", True, d[1].get("mark")))
             d[1]["open"] = on
         self.stateChanged.emit()
 
@@ -1604,6 +1698,10 @@ class SideTree(QTreeWidget):
             self.openPath.emit(d[1] if d[0] == "path" else d[1]["path"], False)
         else:                                    # 섹션/북마크 폴더: 접기 ↔ 펼치기
             it.setExpanded(not it.isExpanded())
+
+    def wheelEvent(self, e):
+        if not shift_wheel(self, e):
+            super().wheelEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MiddleButton:
@@ -2503,6 +2601,8 @@ class Main(QMainWindow):
         import shellmenu as SM
         m = SM.ShellMenu(paths, view.path, extended=bool(QGuiApplication.keyboardModifiers() & Qt.ShiftModifier))
         try:
+            if paths:                    # 위쪽 내 항목(열기, 런처에 추가)과 겹치는 Windows 항목은 지움
+                m.remove_verbs({"open", "jylauncheradd"})
             actions, items = {}, []
 
             def add(text, fn):
@@ -2750,6 +2850,7 @@ class Main(QMainWindow):
                 m.addAction("이 안에 새 폴더…", lambda: self.new_bm_folder(n))
                 m.addAction("폴더 풀기 (안의 북마크를 밖으로)", lambda: self.unwrap_folder(n))
             m.addSeparator()
+            self.add_mark_menu(m, n)
             m.addAction("이름 변경…", lambda: self.rename_node(n))
             m.addAction("위로 이동", lambda: self.move_node(n, -1))
             m.addAction("아래로 이동", lambda: self.move_node(n, 1))
@@ -2773,6 +2874,25 @@ class Main(QMainWindow):
                 m.addAction("최근 목록 지우기" if payload == "recent" else "자주 가는 곳 목록 지우기",
                             lambda: self.clear_visits(payload))
         m.exec(pos)
+
+    def add_mark_menu(self, m, n):
+        """북마크 구분용 표시: 도형(동그라미/세모/네모/마름모/별) × 색(6가지)"""
+        sub = m.addMenu("표시 지정 (도형 · 색)")
+        for shape, sname in MARK_SHAPES:
+            s = sub.addMenu(QIcon(mark_pixmap(shape, "#c5cae9", 16)), sname)
+            for color, cname in MARK_COLORS:
+                s.addAction(QIcon(mark_pixmap(shape, color, 16)), cname,
+                            lambda sh=shape, co=color: self.set_mark(n, [sh, co]))
+        if n.get("mark"):
+            sub.addSeparator()
+            sub.addAction("표시 없음", lambda: self.set_mark(n, None))
+
+    def set_mark(self, n, mark):
+        if mark:
+            n["mark"] = mark
+        else:
+            n.pop("mark", None)
+        self.bookmarks_changed()
 
     def forget_visit(self, path, src):
         k = os.path.normcase(path)
@@ -2851,6 +2971,7 @@ class Main(QMainWindow):
         m = QMenu(self)
         if n is not None:
             m.addAction("열기 (양쪽 패널에 각각)", lambda: self.open_pair(n))
+            self.add_mark_menu(m, n)
             m.addAction("이름 변경…", lambda: self.rename_node(n))
             m.addAction("왼쪽으로 이동", lambda: self.move_node(n, -1))
             m.addAction("오른쪽으로 이동", lambda: self.move_node(n, 1))
@@ -3515,6 +3636,11 @@ def main():
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    try:
+        import shellmenu
+        shellmenu.enable_dark_menus()           # 우클릭 Windows 메뉴도 어두운 색으로
+    except Exception:
+        pass
     load_font(app)
     app.setStyleSheet(QSS)
     app.setWindowIcon(app_icon("JYExplorer"))
