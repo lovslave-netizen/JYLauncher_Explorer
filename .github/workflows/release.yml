@@ -36,27 +36,27 @@ jobs:
       # 테스트는 단계를 나눠서, 실패하면 어느 테스트인지 바로 보이게 함
       - name: 테스트 - 업데이터
         shell: pwsh
-        run: python test_updater.py
+        run: ./ci_test.ps1 test_updater.py
 
       - name: 테스트 - 검색
         shell: pwsh
-        run: python test_search.py
+        run: ./ci_test.ps1 test_search.py
 
       - name: 테스트 - 즐겨찾기 동기화/백업
         shell: pwsh
-        run: python test_favsync.py
+        run: ./ci_test.ps1 test_favsync.py
 
       - name: 테스트 - Everything 설정 파일
         shell: pwsh
-        run: python test_everything_ini.py
+        run: ./ci_test.ps1 test_everything_ini.py
 
       - name: 테스트 - 새로 만들기 메뉴
         shell: pwsh
-        run: python test_newmenu.py
+        run: ./ci_test.ps1 test_newmenu.py
 
       - name: 테스트 - 화면 스모크
         shell: pwsh
-        run: python test_smoke.py
+        run: ./ci_test.ps1 test_smoke.py
 
       - name: Inno Setup 준비
         shell: pwsh
