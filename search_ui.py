@@ -7,6 +7,7 @@ import threading
 import time
 
 from PySide6.QtCore import QFileInfo, QObject, Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QFileIconProvider, QHeaderView, QMessageBox, QTreeWidget, QTreeWidgetItem)
 
 import filesearch as FS
@@ -47,6 +48,7 @@ class ResultsTree(QTreeWidget):
     """검색 결과 목록. 더블클릭/Enter = openRequested(경로, 폴더인지), 우클릭 = menuRequested(경로, 폴더인지, 전역좌표)"""
     openRequested = Signal(str, bool)
     menuRequested = Signal(str, bool, object)
+    copyRequested = Signal(list)                 # Ctrl+C: 선택한 결과의 경로 목록
     MAX_ROWS = 5000
 
     def __init__(self, parent=None):
@@ -72,6 +74,14 @@ class ResultsTree(QTreeWidget):
         self.customContextMenuRequested.connect(self._menu)
         self.itemActivated.connect(self._activated)
         self.itemDoubleClicked.connect(self._activated)
+
+    def keyPressEvent(self, e):
+        if e.matches(QKeySequence.Copy):
+            paths = [r[0] for r in self.selected_results() if r]
+            if paths:
+                self.copyRequested.emit(paths)
+            return
+        super().keyPressEvent(e)
 
     def clear_results(self):
         self.clear()
