@@ -13,6 +13,7 @@ permissions:
 
 env:
   QT_QPA_PLATFORM: offscreen
+  PYTHONUTF8: "1"                # 러너 콘솔이 cp1252 라서 한글 출력이 오류가 나지 않게
 
 jobs:
   build:

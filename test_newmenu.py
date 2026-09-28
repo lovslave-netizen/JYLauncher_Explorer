@@ -8,7 +8,7 @@ import newmenu
 
 types = newmenu.list_types()
 assert types and any(t["ext"] == ".ahk" for t in types), types          # 등록된 형식이 없어도 .ahk 는 기본 제공
-print("새로 만들기 형식:", len(types), "개:", ", ".join(t["ext"] for t in types))
+print("new-menu types:", len(types), ", ".join(t["ext"] for t in types))
 root = tempfile.mkdtemp()
 for t in types[:3] + [next(t for t in types if t["ext"] == ".ahk")]:
     a = newmenu.create_file(root, t)
@@ -25,7 +25,7 @@ try:
     import shellmenu as SM
     m = SM.ShellMenu([], root)
 except Exception as e:                                                    # noqa: BLE001
-    print("셸 메뉴를 만들 수 없는 환경 — 하위 메뉴 검사 건너뜀:", type(e).__name__)
+    print("shell menu unavailable here - submenu check skipped:", type(e).__name__)
 else:
     icon = (16, 16, bytes(16 * 16 * 4))
     m.remove_texts({"새 폴더", "새로 만들기", "new folder", "new"})
