@@ -11,6 +11,9 @@ on:
 permissions:
   contents: write
 
+env:
+  QT_QPA_PLATFORM: offscreen
+
 jobs:
   build:
     runs-on: windows-latest
@@ -30,13 +33,22 @@ jobs:
           $v = (python -c "from version import __version__ as v; print(v)").Trim()
           if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "태그($env:GITHUB_REF_NAME)와 version.py($v)가 다릅니다" }
 
-      - name: 업데이터 테스트
+      # 테스트는 단계를 나눠서, 실패하면 어느 테스트인지 바로 보이게 함
+      - name: 테스트 - 업데이터
         shell: pwsh
-        run: |
-          python test_updater.py
-          python test_search.py
-          python test_everything_ini.py
-          python test_smoke.py
+        run: python test_updater.py
+
+      - name: 테스트 - 검색
+        shell: pwsh
+        run: python test_search.py
+
+      - name: 테스트 - Everything 설정 파일
+        shell: pwsh
+        run: python test_everything_ini.py
+
+      - name: 테스트 - 화면 스모크
+        shell: pwsh
+        run: python test_smoke.py
 
       - name: Inno Setup 준비
         shell: pwsh
