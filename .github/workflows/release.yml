@@ -32,7 +32,9 @@ jobs:
 
       - name: 업데이터 테스트
         shell: pwsh
-        run: python test_updater.py
+        run: |
+          python test_updater.py
+          python test_search.py
 
       - name: Inno Setup 준비
         shell: pwsh

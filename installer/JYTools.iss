@@ -1,4 +1,4 @@
-; JY Tools 설치 프로그램 (Inno Setup 6)
+﻿; JY Tools 설치 프로그램 (Inno Setup 6)
 ;
 ; 빌드:  프로젝트 폴더에서 .\build.ps1 -Installer
 ;        (내부적으로 pyinstaller --noconfirm --clean JYTools.spec → ISCC /DAppVersion=x.y.z installer\JYTools.iss)
@@ -12,7 +12,7 @@
 ;   - 조용한 설치(/SILENT)에서는 /RELAUNCH=launcher,explorer 로 지정한 프로그램을 설치 후 다시 실행
 
 #ifndef AppVersion
-  #define AppVersion "0.1.3"
+  #define AppVersion "0.1.4"
 #endif
 #define AppName "JY Tools"
 #define AppIdGuid "7A3C1E52-4B8D-4F6A-9C21-5D0E8B7F3A10"
@@ -47,6 +47,7 @@ Name: "importfav"; Description: "Windows 탐색기의 기존 즐겨찾기를 JY 
 Name: "startup"; Description: "Windows 시작 시 런처 자동 실행 (트레이 상주, Ctrl+Alt+L 로 호출)"; Components: launcher
 Name: "startup_explorer"; Description: "Windows 시작 시 탐색기도 자동 실행 (트레이 상주, Win+E 로 JY Explorer 열기)"; Components: explorer
 Name: "ctxmenu"; Description: "Windows 탐색기 우클릭 메뉴에 '런처에 추가' 넣기"; Components: launcher
+Name: "everything"; Description: "Everything 설치 — 파일 검색을 아주 빠르게 해 주는 무료 프로그램 (설치 시 관리자 권한 확인창이 뜹니다. 없어도 검색은 되지만 매우 느립니다)"; Check: not EverythingInstalled
 Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; Flags: unchecked
 
 [Files]
@@ -78,6 +79,8 @@ Root: HKCU; Subkey: "Software\Classes\*\shell\JYLauncherAdd"; ValueType: none; F
 Root: HKCU; Subkey: "Software\Classes\Directory\shell\JYLauncherAdd"; ValueType: none; Flags: dontcreatekey uninsdeletekey
 
 [Run]
+; 처음 설치 때만: Everything 설치 (winget, 없으면 voidtools 에서 내려받아 조용히 설치 → 서비스 등록). 관리자 확인창은 그쪽에서 뜸
+Filename: "{app}\JYLauncher.exe"; Parameters: "--install-everything"; Flags: runhidden waituntilterminated; StatusMsg: "Everything 을 설치하는 중... (관리자 권한 확인창이 뜨면 '예'를 눌러 주세요)"; Tasks: everything; Check: IsFreshInstall and not EverythingInstalled
 ; 처음 설치 때만: 즐겨찾기 불러오기
 Filename: "{app}\JYExplorer.exe"; Parameters: "--import-favorites"; Flags: runhidden waituntilterminated; StatusMsg: "Windows 탐색기 즐겨찾기를 불러오는 중..."; Tasks: importfav; Check: IsFreshInstall
 ; 화면 있는 설치: 마지막 페이지의 "시작" 체크
@@ -102,6 +105,24 @@ end;
 function IsFreshInstall(): Boolean;
 begin
   Result := Fresh;
+end;
+
+function EverythingInstalled(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{commonpf}\Everything\Everything.exe'))
+         or FileExists(ExpandConstant('{commonpf32}\Everything\Everything.exe'))
+         or FileExists(ExpandConstant('{localappdata}\Programs\Everything\Everything.exe'))
+         or RegKeyExists(HKLM, 'SOFTWARE\voidtools\Everything');
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  // 처음 설치인데 Everything 이 없고 설치 체크도 껐다면 한 번 더 확인 (없으면 파일 검색이 매우 느림)
+  if (CurPageID = wpSelectTasks) and (not WizardSilent) and Fresh and (not EverythingInstalled) and (not WizardIsTaskSelected('everything')) then
+    Result := MsgBox('Everything 을 설치하지 않으면 파일 검색은 되지만, 폴더를 직접 훑기 때문에 매우 느립니다.' + #13#10 +
+                     '(Everything 은 무료이고 매우 가벼운 프로그램입니다.)' + #13#10 + #13#10 +
+                     '설치하지 않고 계속할까요?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
 end;
 
 function ShouldRelaunch(Name: String): Boolean;

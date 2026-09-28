@@ -108,6 +108,30 @@ def pick_category(parent, existing, exclude=()):
     return name.strip() if ok2 and name.strip() else None
 
 
+def open_in_explorer(path):
+    """폴더를 JY Explorer(새 탭)로 엶. JY Explorer 가 없으면 Windows 탐색기(기본 연결)로"""
+    import subprocess
+    try:
+        if FROZEN:
+            exe = APP_DIR / "JYExplorer.exe"
+            if exe.exists():
+                subprocess.Popen([str(exe), str(path)], cwd=str(APP_DIR))
+                return True
+        else:
+            src = APP_DIR / "JYExplorer.py"
+            if src.exists():
+                py = Path(sys.executable).with_name("pythonw.exe")
+                subprocess.Popen([str(py if py.exists() else sys.executable), str(src), str(path)], cwd=str(APP_DIR))
+                return True
+    except OSError:
+        pass
+    try:
+        os.startfile(str(path))
+        return True
+    except OSError:
+        return False
+
+
 def file_mtime(path):
     try:
         return os.stat(path).st_mtime

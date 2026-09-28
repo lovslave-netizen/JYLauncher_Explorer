@@ -7,7 +7,7 @@ HIDDEN = ["win32com.shell.shell", "win32com.shell.shellcon", "win32gui", "win32a
 EXCLUDES = ["tkinter", "unittest", "pydoc_data",
             "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQuick", "PySide6.QtQml",
             "PySide6.Qt3DCore", "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization"]
-DATAS = [("fonts", "fonts"), ("JYLauncher.ico", "."), ("JYExplorer.ico", ".")]   # .ico: 창/트레이 아이콘용 (exe 아이콘은 icon= 으로 따로)
+DATAS = [("fonts", "fonts"), ("everything", "everything"), ("JYLauncher.ico", "."), ("JYExplorer.ico", ".")]   # .ico: 창/트레이 아이콘용 (exe 아이콘은 icon= 으로 따로)
 
 
 def build(script, name):

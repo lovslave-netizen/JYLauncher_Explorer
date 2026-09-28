@@ -28,6 +28,10 @@ from PySide6.QtWidgets import (
 
 from jycommon import (DATA_DIR, FONT_FAMILY, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, SETTINGS_FILE, VAULT_FILE,
                       add_item_to_launcher, app_icon, create_app_shortcuts, file_mtime, pick_category, load_font, load_json, save_json)
+import appsearch
+import filesearch as FS
+import search_ui as SUI
+from jycommon import open_in_explorer
 from updater import Updater
 from version import __version__
 
@@ -90,6 +94,13 @@ QTreeWidget::item { padding: 7px 4px; border-radius: 9px; }
 QTreeWidget::item:hover { background: rgba(255,255,255,0.07); }
 QTreeWidget::item:selected { background: rgba(124,140,255,0.28); color: white; }
 
+QHeaderView { background: transparent; border: none; }
+QHeaderView::section { background: transparent; border: none; color: #8a90b0; padding: 6px 8px; font-size: 12px; }
+QLineEdit#ext { background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.08); border-radius: 13px; padding: 6px 12px; font-size: 13px; selection-background-color: #7c8cff; }
+QLineEdit#ext:focus { border: 1px solid #7c8cff; }
+QPushButton#chip { background: rgba(255,255,255,0.07); border: none; border-radius: 13px; padding: 6px 14px; font-size: 13px; }
+QPushButton#chip:hover { background: rgba(255,255,255,0.15); }
+QPushButton#chip:checked { background: #5b6cff; color: white; }
 QComboBox { background: rgba(255,255,255,0.07); border: none; border-radius: 12px; padding: 8px 14px; min-width: 110px; }
 QComboBox QAbstractItemView { background: #1e2140; border: 1px solid #333863; selection-background-color: #5b6cff; outline: 0; }
 QComboBox::drop-down { border: none; width: 22px; }
@@ -1352,6 +1363,309 @@ def set_ctx(on):
                     pass
 
 
+EXT_GROUPS = (("xlsx", ("xlsx", "xls", "xlsm")), ("hwp", ("hwp", "hwpx")), ("pdf", ("pdf",)), ("docx", ("docx", "doc")),
+              ("pptx", ("pptx", "ppt")), ("txt", ("txt", "md", "csv")),
+              ("이미지", ("jpg", "jpeg", "png", "gif", "bmp", "webp")), ("동영상", ("mp4", "mkv", "avi", "mov", "wmv")))
+
+
+class SearchPage(QWidget):
+    """검색 탭: 왼쪽 = 앱 검색(시작 메뉴 앱. 평소엔 접혀 있다가 펼칠 때 목록을 만듦), 오른쪽 = 파일 검색(Everything).
+    입력은 맨 위 검색창을 그대로 씀 (아무 글자나 치면 검색창으로 들어감)"""
+    _apps_ready = Signal(list)
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.text = ""
+        self.apps = None                  # 앱 색인 (펼칠 때 처음 한 번 만듦)
+        self.indexing = False
+        self.active = "files"
+        self.searcher = FS.Searcher(self)
+        self.searcher.results.connect(self._on_results)
+        self.searcher.done.connect(self._on_done)
+        self.guard = SUI.EverythingGuard(self)
+        self.guard.message.connect(main.say)
+        self.guard.finished.connect(self._on_guard)
+        self._gen, self._use_everything, self._guard_done = 0, True, False
+        self._timer = QTimer(self, singleShot=True, interval=350)
+        self._timer.timeout.connect(self.run)
+        self._apps_ready.connect(self._on_apps_ready)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        opts = QHBoxLayout()
+        opts.setSpacing(8)
+        lbl = QLabel("검색 위치")
+        lbl.setObjectName("dim")
+        opts.addWidget(lbl)
+        self.scope = QComboBox()
+        self.scope.setFocusPolicy(Qt.NoFocus)
+        home = Path.home()
+        for name, path in (("전체 (Everything)", None), ("사용자 폴더", str(home)), ("문서", str(home / "Documents")),
+                           ("바탕화면", str(home / "Desktop")), ("다운로드", str(home / "Downloads"))):
+            self.scope.addItem(name, path)
+        self.scope.addItem("폴더 선택…", "__pick__")
+        self._scope_idx = 0
+        self.scope.currentIndexChanged.connect(self._scope_changed)
+        opts.addWidget(self.scope)
+        opts.addSpacing(10)
+        self.chips = []
+        for label, exts in EXT_GROUPS:
+            b = QPushButton(label)
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setToolTip("확장자: " + ", ".join(exts))
+            b.toggled.connect(lambda _v: self._timer.start())
+            self.chips.append((b, exts))
+            opts.addWidget(b)
+        self.ext_edit = QLineEdit()
+        self.ext_edit.setObjectName("ext")
+        self.ext_edit.setPlaceholderText("확장자 직접 입력 (예: xlsx, hwp)")
+        self.ext_edit.setFixedWidth(230)
+        self.ext_edit.textChanged.connect(lambda _t: self._timer.start())
+        opts.addWidget(self.ext_edit)
+        opts.addStretch(1)
+        self.ev_btn = QPushButton("Everything 상태")
+        self.ev_btn.setObjectName("chip")
+        self.ev_btn.setFocusPolicy(Qt.NoFocus)
+        self.ev_btn.setToolTip("Everything 설치 / 연결 상태를 확인하고 필요하면 설치·설정합니다")
+        self.ev_btn.clicked.connect(self._check_everything)
+        opts.addWidget(self.ev_btn)
+        lay.addLayout(opts)
+
+        self.status = QLabel("맨 위 검색창에 검색어를 입력하세요  (파일 이름 / 앱 이름).  확장자 버튼으로 xlsx, hwp 같은 파일만 찾을 수도 있습니다")
+        self.status.setObjectName("dim")
+        lay.addWidget(self.status)
+
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        # 앱 검색 (접힘/펼침)
+        self.app_panel = QFrame()
+        self.app_panel.setObjectName("sidebar")
+        al = QVBoxLayout(self.app_panel)
+        al.setContentsMargins(10, 10, 10, 10)
+        al.setSpacing(8)
+        self.app_btn = QPushButton("앱 검색  (펼치기)")
+        self.app_btn.setObjectName("chip")
+        self.app_btn.setCheckable(True)
+        self.app_btn.setFocusPolicy(Qt.NoFocus)
+        self.app_btn.setToolTip("시작 메뉴에서 검색되는 앱을 찾아 실행합니다. 펼칠 때 처음 한 번 목록을 만듭니다")
+        self.app_btn.toggled.connect(self._toggle_apps)
+        al.addWidget(self.app_btn)
+        self.app_note = QLabel("")
+        self.app_note.setObjectName("dim")
+        self.app_note.setWordWrap(True)
+        self.app_note.hide()
+        al.addWidget(self.app_note)
+        self.app_list = make_tree()
+        self.app_list.setColumnCount(1)
+        self.app_list.hide()
+        self.app_list.itemActivated.connect(self._launch_app_item)
+        self.app_list.itemClicked.connect(self._launch_app_item)
+        al.addWidget(self.app_list, 1)
+        al.addStretch(0)
+        self.app_panel.setFixedWidth(200)
+        body.addWidget(self.app_panel)
+        # 파일 검색 결과
+        self.tree = SUI.ResultsTree()
+        self.tree.openRequested.connect(self.open_result)
+        self.tree.menuRequested.connect(self._result_menu)
+        body.addWidget(self.tree, 1)
+        lay.addLayout(body, 1)
+
+    # ---- 입력 ----
+    def set_filter(self, text):
+        self.text = text
+        self._timer.start()
+
+    def selected_exts(self):
+        out = []
+        for b, exts in self.chips:
+            if b.isChecked():
+                out += list(exts)
+        for e in self.ext_edit.text().replace(";", ",").replace(" ", ",").split(","):
+            e = e.strip().lstrip(".*").lower()
+            if e:
+                out.append(e)
+        return list(dict.fromkeys(out))
+
+    def _scope_changed(self, i):
+        if self.scope.itemData(i) == "__pick__":
+            d = QFileDialog.getExistingDirectory(self, "검색할 폴더", str(Path.home()))
+            if d:
+                d = os.path.normpath(d)
+                self.scope.blockSignals(True)
+                self.scope.setItemText(i, d)
+                self.scope.setItemData(i, d)
+                self.scope.blockSignals(False)
+            else:
+                self.scope.blockSignals(True)
+                self.scope.setCurrentIndex(self._scope_idx)
+                self.scope.blockSignals(False)
+                return
+        self._scope_idx = self.scope.currentIndex()
+        self._timer.start()
+
+    # ---- 검색 실행 ----
+    def run(self):
+        text, exts = self.text.strip(), self.selected_exts()
+        self._refresh_apps()
+        if not text and not exts:
+            self.searcher.cancel()
+            self._gen += 1
+            self.tree.clear_results()
+            self.status.setText("맨 위 검색창에 검색어를 입력하세요  (파일 이름 / 앱 이름).  확장자 버튼으로 xlsx, hwp 같은 파일만 찾을 수도 있습니다")
+            return
+        if not self._guard_done and FS.Searcher.status() != "ready":      # 처음 한 번만 Everything 상태 확인/안내
+            self._guard_done = True
+            self.guard.ensure()
+            return
+        self._guard_done = True
+        root = self.scope.currentData()
+        if root == "__pick__":
+            root = None
+        if root is None and not self._use_everything:
+            root = str(Path.home())                    # Everything 없이는 전체 검색이 불가 → 사용자 폴더만
+        self.tree.clear_results()
+        self.status.setText("검색 중…")
+        self._gen = self.searcher.search(text, root, exts, 2000, use_everything=self._use_everything)
+
+    def _on_guard(self, ok):
+        self._use_everything = ok
+        self._guard_done = True
+        self.run()
+
+    def _check_everything(self):
+        self._guard_done = False
+        self._asked_reset()
+        st = FS.Searcher.status()
+        if st == "ready":
+            self.main.say("Everything 연결됨 — 전체 검색을 빠르게 쓸 수 있습니다")
+            self._use_everything = True
+            return
+        self.guard.settings["everything"] = ""       # 사용자가 직접 눌렀으니 예전에 '설치 안 함'을 골랐어도 다시 안내
+        self.guard.ensure()
+
+    def _asked_reset(self):
+        self.guard._asked.clear()
+
+    def _on_results(self, gen, rows):
+        if gen != self._gen:
+            return
+        self.tree.add_rows(rows)
+        self.status.setText(f"검색 중…  {self.tree.topLevelItemCount():,}개")
+
+    def _on_done(self, gen, info):
+        if gen != self._gen:
+            return
+        n = self.tree.topLevelItemCount()
+        how = {"everything": "Everything (빠름)", "scan": "직접 검색 (느림 — Everything 을 설치하면 즉시 검색)"}.get(info.get("backend"), "")
+        msg = f"파일 {n:,}개" + (f"  ·  {how}" if how else "")
+        if info.get("truncated"):
+            msg += "  ·  결과가 많아 일부만 표시 (검색어를 더 구체적으로)"
+        if info.get("note"):
+            msg += "  ·  " + info["note"]
+        if info.get("error"):
+            msg += "  ·  " + info["error"]
+        elif n == 0:
+            msg += "  ·  결과 없음"
+        self.status.setText(msg)
+
+    # ---- 앱 검색 ----
+    def _toggle_apps(self, on):
+        self.app_btn.setText("앱 검색  (접기)" if on else "앱 검색  (펼치기)")
+        self.app_panel.setFixedWidth(400 if on else 200)
+        self.app_list.setVisible(on)
+        self.app_note.setVisible(on and self.apps is None)
+        if on:
+            self.active = "apps"
+            self._refresh_apps()
+        else:
+            self.active = "files"
+
+    def _refresh_apps(self):
+        if not self.app_btn.isChecked():
+            return
+        if self.apps is None:
+            if not self.indexing:
+                self.indexing = True
+                self.app_note.setText("앱 목록을 만드는 중…")
+                self.app_note.show()
+                threading.Thread(target=lambda: self._apps_ready.emit(appsearch.build_index()), daemon=True).start()
+            return
+        self.app_list.clear()
+        hits = appsearch.filter_apps(self.apps, self.text)[:80]
+        for a in hits:
+            it = QTreeWidgetItem([a["name"]])
+            it.setData(0, Qt.UserRole, a)
+            it.setToolTip(0, a["name"] + ("\n" + a["folder"] if a.get("folder") else ""))
+            it.setIcon(0, file_icon(a["target"]) if a["kind"] == "lnk" else file_icon("x.exe"))
+            self.app_list.addTopLevelItem(it)
+        if hits:
+            self.app_list.setCurrentItem(self.app_list.topLevelItem(0))
+        self.app_note.setText(f"{len(hits)}개" if self.text.strip() else f"앱 {len(self.apps)}개 — 위 검색창에 이름을 입력하세요")
+        self.app_note.setVisible(True)
+
+    def _on_apps_ready(self, apps):
+        self.apps = apps
+        self.indexing = False
+        self._refresh_apps()
+
+    def _launch_app_item(self, it, _c=0):
+        a = it.data(0, Qt.UserRole)
+        if not a:
+            return
+        try:
+            appsearch.launch(a)
+            self.main.say(f"실행: {a['name']}")
+            if self.main.hide_btn.isChecked():
+                self.main.hide()
+        except Exception as ex:
+            self.main.say(f"! 실행 실패: {ex}")
+
+    # ---- 파일 결과 동작 ----
+    def open_result(self, path, is_dir):
+        if is_dir:
+            open_in_explorer(path)
+            return
+        try:
+            os.startfile(path)
+            self.main.say("열기: " + os.path.basename(path))
+        except OSError as ex:
+            self.main.say(f"! 열 수 없음: {ex}")
+
+    def _result_menu(self, path, is_dir, pos):
+        m = QMenu(self)
+        m.addAction("열기", lambda: self.open_result(path, is_dir))
+        folder = path if is_dir else os.path.dirname(path)
+        m.addAction("폴더 열기 (JY Explorer)", lambda: open_in_explorer(folder))
+        m.addAction("경로 복사", lambda: QApplication.clipboard().setText(path))
+        m.addAction("런처에 추가", lambda: (add_item_to_launcher(path), self.main.reload_launcher(), self.main.say("런처에 추가했습니다")))
+        m.exec(pos)
+
+    # ---- 키 (런처 공통 키 처리에서 넘어옴) ----
+    def current_tree(self):
+        return self.app_list if (self.active == "apps" and self.app_btn.isChecked()) else self.tree
+
+    def handle_key(self, e):
+        k = e.key()
+        if k == Qt.Key_Left and self.app_btn.isChecked():
+            self.active = "apps"
+            return True
+        if k == Qt.Key_Right:
+            self.active = "files"
+            return True
+        t = self.current_tree()
+        if forward_tree_key(t, e):
+            return True
+        if k in (Qt.Key_Return, Qt.Key_Enter) and t.currentItem():
+            (self._launch_app_item if t is self.app_list else self.tree._activated)(t.currentItem())
+            return True
+        return False
+
+
 class SettingsPage(QWidget):
     toast = Signal(str)
 
@@ -1585,8 +1899,10 @@ class Main(QWidget):
         self.hide_btn.toggled.connect(self.on_hide_toggle)
         self.settings_page = SettingsPage(self)
         self.settings_page.toast.connect(self.say)
+        self.search_page = SearchPage(self)
         self.pages = [("런처", "런처", self.launcher), ("최근", "최근 항목", self.recent),
-                      ("보관함", "고정 보관함", self.vault), ("설정", "설정", self.settings_page)]
+                      ("보관함", "고정 보관함", self.vault), ("검색", "검색  ·  파일 / 앱", self.search_page),
+                      ("설정", "설정", self.settings_page)]
         for i, (label, _t, page) in enumerate(self.pages):
             b = QPushButton(label)
             b.setObjectName("nav")
@@ -1615,7 +1931,7 @@ class Main(QWidget):
 
         # 하단
         foot = QHBoxLayout()
-        hint = QLabel("↑↓←→ 이동   Enter 실행   Space 그룹 열기/닫기   Ctrl+F 검색↔목록 (Tab)   드래그로 이동·묶기   Ctrl+1~4 탭   F11 전체화면   Esc 닫기")
+        hint = QLabel("↑↓←→ 이동   Enter 실행   Space 그룹 열기/닫기   Ctrl+F 검색↔목록 (Tab)   드래그로 이동·묶기   Ctrl+1~5 탭   F11 전체화면   Esc 닫기")
         hint.setObjectName("hint")
         self.toast_lbl = QLabel()
         self.toast_lbl.setObjectName("toast")
@@ -1702,7 +2018,8 @@ class Main(QWidget):
         sort.currentTextChanged.connect(self.vault.set_sort)
         self.action_sets.append([sort, btn("＋ 폴더", self.vault.add_folder),
                                  btn("＋ 파일", self.vault.add_files)])
-        self.action_sets.append([])
+        self.action_sets.append([])          # 검색 탭
+        self.action_sets.append([])          # 설정 탭
         for s in self.action_sets:
             for w in s:
                 self.actions.addWidget(w)
@@ -1724,7 +2041,7 @@ class Main(QWidget):
                 w.setVisible(k == i)
         if i == 1:
             self.recent.refresh()
-        elif i == 3:
+        elif i == 4:
             self.settings_page.refresh()
         self.on_search(self.search.text())
 
@@ -1865,7 +2182,7 @@ class Main(QWidget):
                 self.hide()
         elif k == Qt.Key_F11:
             self.toggle_fullscreen()
-        elif mods & Qt.ControlModifier and Qt.Key_1 <= k <= Qt.Key_4:
+        elif mods & Qt.ControlModifier and Qt.Key_1 <= k <= Qt.Key_5:
             self.goto(k - Qt.Key_1)
         elif mods & Qt.ControlModifier and k == Qt.Key_F:      # Ctrl+F: 검색 ↔ 목록 왕복
             if self.search.hasFocus():
@@ -1937,6 +2254,9 @@ def main():
         _log_startup(f"시작 (pid={os.getpid()}, cwd={os.getcwd()}, exe={sys.executable})")
         sys.excepthook = lambda *exc: (_log_startup("미처리 예외: " + "".join(
             __import__("traceback").format_exception(*exc))), sys.__excepthook__(*exc))
+    if "--install-everything" in args:   # 설치 프로그램의 'Everything 설치' 체크 → 창 없이 설치/설정 (관리자 확인창만 뜸)
+        FS.install_everything()
+        return
     if "--add" in args:  # 탐색기 우클릭 메뉴: 런처에 추가 (창 없이 처리)
         for pth in [a for a in args[args.index("--add") + 1:] if not a.startswith("--")]:
             add_item_to_launcher(pth)
@@ -1994,6 +2314,9 @@ def main():
     else:
         _log_startup("트레이 상주 시작됨 (창 없이 대기)")
     if "--selftest" in sys.argv:
+        (DATA_DIR / "selftest_launcher.txt").write_text(
+            f"everything_dll={FS.Searcher.client().dll is not None} status={FS.Searcher.status()} "
+            f"pages={[p[0] for p in w.pages]}\n", encoding="utf-8")
         QTimer.singleShot(1500, w.quit_app)
     sys.exit(app.exec())
 

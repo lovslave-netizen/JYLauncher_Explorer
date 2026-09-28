@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (
 )
 
 import fileops as F
+import filesearch as FS
 import mediainfo as MI
+import search_ui as SUI
 from jycommon import (BACKUP_DIR, BOOKMARKS_FILE, EXPLORER_FILE, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, add_item_to_launcher, app_icon, backup_favorites,
                       load_font, load_json, pick_category, save_json)
 from updater import Updater
@@ -774,6 +776,20 @@ class PathBar(QLineEdit):
         super().keyPressEvent(e)
 
 
+# ───────────────────────── 하위 폴더 검색 결과 (파일 목록 대신 보임) ─────────────────────────
+class SearchPanel(QWidget):
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self.status = QLabel("")
+        self.status.setObjectName("status")
+        self.tree = SUI.ResultsTree()
+        lay.addWidget(self.status)
+        lay.addWidget(self.tree, 1)
+
+
 # ───────────────────────── 패널 (탭 묶음) ─────────────────────────
 class Pane(QFrame):
     activated = Signal(object)
@@ -832,6 +848,11 @@ class Pane(QFrame):
         lay.addWidget(self.tabbar)
         self.stack = QStackedWidget()
         lay.addWidget(self.stack, 1)
+        self.search_panel = SearchPanel()          # 하위 폴더 검색 결과: 켜지면 파일 목록 대신 보임 (탭/뷰는 그대로 유지)
+        self.search_panel.hide()
+        self.search_panel.tree.openRequested.connect(lambda p, d: self.main.open_search_result(self, p, d))
+        self.search_panel.tree.menuRequested.connect(lambda p, d, pos: self.main.search_result_menu(self, p, d, pos))
+        lay.addWidget(self.search_panel, 1)
 
     def _nav_btn(self, text, tip):
         b = QToolButton()
@@ -856,6 +877,15 @@ class Pane(QFrame):
     def view(self):
         w = self.stack.currentWidget()
         return w if isinstance(w, FileView) else None
+
+    def show_search(self):
+        self.stack.hide()
+        self.search_panel.show()
+
+    def hide_search(self):
+        if self.search_panel.isVisible():
+            self.search_panel.hide()
+            self.stack.show()
 
     def _index_of(self, vid):
         for i in range(self.tabbar.count()):
@@ -921,6 +951,8 @@ class Pane(QFrame):
         self._refresh_tab(vid)
         self.main.record_visit(path)
         if self.view() is self.views.get(vid):
+            self.hide_search()                     # 다른 폴더로 이동하면 (그 폴더 기준이었던) 검색 결과는 닫음
+        if self.view() is self.views.get(vid):
             self.pathbar.set_path(path)
             self.update_star()
             self.statusChanged.emit()
@@ -930,6 +962,7 @@ class Pane(QFrame):
         vid = self.tabbar.tabData(i) if i >= 0 else None
         v = self.views.get(vid)
         if v:
+            self.hide_search()
             self.stack.setCurrentWidget(v)
             self.pathbar.set_path(v.path)
             self.update_star()
@@ -1480,6 +1513,21 @@ def workspace_icon():
     for x, y in ((14, 5), (9, 12), (4, 19)):
         pt.drawRoundedRect(QRectF(x, y, 26, 19), 3.5, 3.5)
     pt.drawLine(4, 25, 30, 25)
+    pt.end()
+    return QIcon(pm)
+
+
+def subfolder_icon():
+    """하위 폴더 포함 검색 = 위 폴더 아래로 들여쓴 폴더 두 개(트리)"""
+    pm, pt = _canvas()
+    pt.setPen(QPen(_ICON_COLOR, 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    pt.setBrush(Qt.NoBrush)
+    pt.drawRoundedRect(QRectF(5, 6, 19, 8), 2.5, 2.5)
+    pt.drawLine(10, 14, 10, 34)
+    pt.drawLine(10, 22, 16, 22)
+    pt.drawLine(10, 34, 16, 34)
+    pt.drawRoundedRect(QRectF(17, 18, 21, 8), 2.5, 2.5)
+    pt.drawRoundedRect(QRectF(17, 30, 21, 8), 2.5, 2.5)
     pt.end()
     return QIcon(pm)
 
@@ -2099,12 +2147,27 @@ class Main(QMainWindow):
         self.ws_btn = btn(workspace_icon(), self.workspace_menu, "작업공간 저장 / 열기")
         self.opt_btn = btn(gear_icon(), self.options_menu, "설정")
         bar.addSpacing(10)
+        self.sub_btn = btn(subfolder_icon(), self.toggle_subsearch,
+                           "하위 폴더까지 검색 (Everything 사용 · Ctrl+Shift+F)\n켜면 검색어를 입력한 폴더의 모든 하위 폴더에서 찾습니다", True)
+        self.sub_btn.setChecked(self.data.get("sub_search", False))
         self.filter = QLineEdit()
-        self.filter.setPlaceholderText("이 폴더에서 이름 검색 (Ctrl+F)")
         self.filter.setClearButtonEnabled(True)
-        self.filter.setFixedWidth(280)
-        self.filter.textChanged.connect(lambda t: self.active_view().set_filter(t))
+        self.filter.setFixedWidth(300)
+        self.filter.textChanged.connect(self.on_filter_changed)
+        self.filter.installEventFilter(self)
+        self._update_filter_hint()
         bar.addWidget(self.filter)
+        # 하위 폴더 검색 (Everything / 직접 검색)
+        self.searcher = FS.Searcher(self)
+        self.searcher.results.connect(self._on_search_results)
+        self.searcher.done.connect(self._on_search_done)
+        self.guard = SUI.EverythingGuard(self)
+        self.guard.message.connect(self.say)
+        self.guard.finished.connect(self._on_guard_finished)
+        self._search_pane, self._search_gen, self._use_everything = None, 0, True
+        self._guard_done = False
+        self._search_t = QTimer(self, singleShot=True, interval=350)
+        self._search_t.timeout.connect(self._run_subsearch)
         outer.addLayout(bar)
 
         # 북마크 바 (크롬처럼 위쪽)
@@ -2252,6 +2315,7 @@ class Main(QMainWindow):
         sc("Ctrl+Alt+Left", self.send_tab_to_other)
         sc("Ctrl+L", lambda: (self.active.pathbar.setFocus(), self.active.pathbar.selectAll()))
         sc("Ctrl+F", lambda: (self.filter.setFocus(), self.filter.selectAll()))
+        sc("Ctrl+Shift+F", self.toggle_subsearch_key)
         sc("Ctrl+D", lambda: self.toggle_bookmark(self.active_view().path))
         sc("Ctrl+Shift+D", self.add_pair_bookmark)
         sc("Ctrl+H", self.toggle_hidden)
@@ -2272,6 +2336,138 @@ class Main(QMainWindow):
         if self.filter.text():
             self.filter.clear()
         self.active_view().setFocus()
+
+    # ---- 검색 (이름 필터 / 하위 폴더 포함 검색) ----
+    def _update_filter_hint(self):
+        self.filter.setPlaceholderText("하위 폴더 포함 검색  (Ctrl+F)" if self.sub_btn.isChecked() else "이 폴더에서 이름 검색  (Ctrl+F)")
+
+    def on_filter_changed(self, text):
+        if self.sub_btn.isChecked():
+            self.active_view().set_filter("")
+            if text.strip():
+                self._search_t.start()
+            else:
+                self.searcher.cancel()
+                self._search_gen += 1
+                self.active.hide_search()
+        else:
+            self.active_view().set_filter(text)
+
+    def toggle_subsearch(self):
+        on = self.sub_btn.isChecked()
+        self.data["sub_search"] = on
+        self.schedule_save()
+        self._update_filter_hint()
+        self.hide_all_search()
+        if on:
+            self.active_view().set_filter("")
+            if self.filter.text().strip():
+                self._search_t.start()
+            self.filter.setFocus()
+        else:
+            self.active_view().set_filter(self.filter.text())
+
+    def toggle_subsearch_key(self):
+        self.sub_btn.click() if not self.sub_btn.isChecked() else None
+        self.filter.setFocus()
+        self.filter.selectAll()
+
+    def hide_all_search(self):
+        self.searcher.cancel()
+        self._search_gen += 1
+        for p in self.panes:
+            p.hide_search()
+
+    def _run_subsearch(self):
+        text = self.filter.text().strip()
+        pane = self.active
+        v = pane.view()
+        if not text or not v:
+            return
+        if not self._guard_done and FS.Searcher.status() != "ready":      # 처음 한 번만 Everything 상태 확인/안내
+            self._guard_done = True
+            self.guard.ensure()
+            return
+        self._guard_done = True
+        root = v.path or None
+        pane.search_panel.tree.clear_results()
+        pane.show_search()
+        pane.search_panel.status.setText("검색 중…")
+        self._search_pane = pane
+        self._search_gen = self.searcher.search(text, root, (), 3000, use_everything=self._use_everything)
+
+    def _on_guard_finished(self, ok):
+        self._use_everything = ok
+        self._guard_done = True
+        if self.filter.text().strip():
+            self._run_subsearch()
+
+    def _on_search_results(self, gen, rows):
+        if gen != self._search_gen or self._search_pane is None:
+            return
+        t = self._search_pane.search_panel.tree
+        t.add_rows(rows)
+        self._search_pane.search_panel.status.setText(f"검색 중…  {t.topLevelItemCount():,}개")
+
+    def _on_search_done(self, gen, info):
+        if gen != self._search_gen or self._search_pane is None:
+            return
+        p = self._search_pane.search_panel
+        n = p.tree.topLevelItemCount()
+        how = {"everything": "Everything", "scan": "직접 검색(느림)"}.get(info.get("backend"), "")
+        msg = f"{n:,}개" + (f"  ·  {how}" if how else "")
+        if info.get("truncated"):
+            msg += "  ·  결과가 많아 일부만 표시 (검색어를 더 구체적으로)"
+        if info.get("note"):
+            msg += "  ·  " + info["note"]
+        if info.get("error"):
+            msg += "  ·  " + info["error"]
+        elif n == 0:
+            msg += "  ·  결과 없음"
+        p.status.setText(msg)
+
+    def open_search_result(self, pane, path, is_dir):
+        if is_dir:
+            self.filter.blockSignals(True)
+            self.filter.clear()
+            self.filter.blockSignals(False)
+            self.hide_all_search()
+            pane.view().navigate(path)
+            pane.view().setFocus()
+        else:
+            try:
+                os.startfile(path)
+            except OSError as e:
+                QMessageBox.warning(self, "열 수 없음", str(e))
+
+    def reveal_in_folder(self, pane, path):
+        """검색 결과의 '폴더 위치 열기': 그 파일이 있는 폴더로 이동하고 파일을 선택"""
+        folder = os.path.dirname(path)
+        self.filter.blockSignals(True)
+        self.filter.clear()
+        self.filter.blockSignals(False)
+        self.hide_all_search()
+        v = pane.view()
+        v.navigate(folder)
+        QTimer.singleShot(500, lambda: v.select_path(path))
+        v.setFocus()
+
+    def search_result_menu(self, pane, path, is_dir, pos):
+        m = QMenu(self)
+        m.addAction("열기", lambda: self.open_search_result(pane, path, is_dir))
+        if not is_dir:
+            m.addAction("폴더 위치 열기 (파일 선택)", lambda: self.reveal_in_folder(pane, path))
+        folder = path if is_dir else os.path.dirname(path)
+        m.addAction("폴더를 새 탭에서 열기", lambda: pane.add_tab(folder))
+        if self.other_pane():
+            m.addAction("폴더를 반대편 패널에서 열기", lambda: self.open_in_other(folder))
+        m.addSeparator()
+        if is_dir:
+            m.addAction("북마크에 추가", lambda: self.add_bookmark(path))
+        m.addAction("런처에 추가", lambda: self.add_to_launcher([path]))
+        m.addAction("경로 복사", lambda: QApplication.clipboard().setText(path))
+        m.exec(pos)
+
 
     def active_view(self):
         return self.active.view()
@@ -2308,6 +2504,16 @@ class Main(QMainWindow):
             o.view().setFocus()
 
     def eventFilter(self, obj, e):
+        if obj is self.filter and e.type() == e.Type.KeyPress and self.active.search_panel.isVisible():
+            tree = self.active.search_panel.tree            # 검색창에서 ↓/Enter 로 결과 목록으로 이동
+            if e.key() in (Qt.Key_Down, Qt.Key_Up):
+                tree.setFocus()
+                return True
+            if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+                cur = tree.current_result()
+                if cur:
+                    self.open_search_result(self.active, cur[0], cur[1])
+                return True
         if e.type() == e.Type.MouseButtonPress and isinstance(obj, QWidget) and self.isAncestorOf(obj):
             w = obj
             while w is not None:
@@ -2337,6 +2543,7 @@ class Main(QMainWindow):
         self.active = pane
         self.refresh_active_marks()
         if changed:
+            self.hide_all_search()                 # 하위 폴더 검색 결과는 검색을 시작한 패널에서만 의미가 있음
             self.filter.blockSignals(True)
             self.filter.clear()
             self.filter.blockSignals(False)
