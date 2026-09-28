@@ -60,6 +60,9 @@ QLabel#status { color: #9aa0c4; font-size: 12px; }
 QLineEdit { background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
     padding: 6px 12px; selection-background-color: #7c8cff; }
 QLineEdit:focus { border: 1px solid #7c8cff; background: rgba(124,140,255,0.10); }
+QPushButton#crumb { background: transparent; padding: 0 7px; border-radius: 6px; }
+QPushButton#crumb:hover { background: rgba(255,255,255,0.16); }
+QLabel#crumbsep { background: transparent; color: #7f86aa; }
 QAbstractItemView QLineEdit { background: #262a4a; border: 1px solid #7c8cff; border-radius: 4px; padding: 0 4px; }
 QAbstractItemView QLineEdit:focus { background: #262a4a; border: 1px solid #7c8cff; }
 QPushButton, QToolButton { background: rgba(255,255,255,0.07); border: none; border-radius: 9px; padding: 6px 12px; }
@@ -452,6 +455,164 @@ class FileView(QTreeView):
             self.dropped.emit(paths, target, bool(mods & Qt.ControlModifier), bool(mods & Qt.ShiftModifier))
 
 
+# ───────────────────────── 경로줄 (폴더 이름을 눌러 그 위치로 이동) ─────────────────────────
+def split_path(path):
+    """경로 → [(표시 이름, 그 위치까지의 경로), ...]  예: D:\\a\\b → D:, a, b.  UNC 는 \\\\서버\\공유 가 첫 항목"""
+    if not path:
+        return [("내 PC", "")]
+    p = os.path.normpath(path)
+    drive, rest = os.path.splitdrive(p)
+    acc = (drive or "") + "\\"
+    out = [(drive or "\\", acc)]
+    for part in [x for x in rest.split("\\") if x]:
+        acc = os.path.join(acc, part)
+        out.append((part, acc))
+    return out
+
+
+class _Crumb(QPushButton):
+    middleClicked = Signal()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MiddleButton and self.rect().contains(e.position().toPoint()):
+            self.middleClicked.emit()
+            return
+        super().mouseReleaseEvent(e)
+
+
+class _CrumbArea(QWidget):
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.bar = bar
+
+    def mousePressEvent(self, e):          # 폴더 이름이 아닌 빈 곳을 누르면 직접 입력 모드
+        self.bar.start_edit()
+
+
+class PathBar(QLineEdit):
+    """평소에는 '폴더 › 폴더 › 폴더' 버튼으로 보이고(누르면 그 폴더로 이동, 가운데 클릭=새 탭),
+    빈 곳을 누르거나 Ctrl+L 이면 주소를 직접 입력하는 입력창으로 바뀜. 넘치면 앞쪽이 … 버튼으로 접힘"""
+    crumbClicked = Signal(str)
+    crumbMiddle = Signal(str)
+    escaped = Signal()
+    RIGHT_PAD = 36                          # 오른쪽 북마크 별 자리
+
+    def __init__(self):
+        super().__init__()
+        self._shown = ""
+        self._segs = []
+        self._items = []
+        self._start = 0
+        self.setFocusPolicy(Qt.ClickFocus)   # 시작하자마자/Tab 으로 입력 모드가 되지 않게 (Ctrl+L, 빈 곳 클릭은 정상)
+        self.area = _CrumbArea(self)
+        self.ell = _Crumb("…", self.area)
+        self.ell.setObjectName("crumb")
+        self.ell.setFocusPolicy(Qt.NoFocus)
+        self.ell.clicked.connect(self._ell_menu)
+        self.ell.hide()
+
+    def set_path(self, path):
+        self._shown = path or "내 PC"
+        self.setText(self._shown)
+        for btn, sep in self._items:
+            btn.deleteLater()
+            if sep:
+                sep.deleteLater()
+        self._items = []
+        self._segs = split_path(path)
+        for i, (name, p) in enumerate(self._segs):
+            btn = _Crumb(name.replace("&", "&&"), self.area)
+            btn.setObjectName("crumb")
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(p or "내 PC")
+            btn.clicked.connect(lambda _=False, p=p: self.crumbClicked.emit(p))
+            btn.middleClicked.connect(lambda p=p: self.crumbMiddle.emit(p))
+            sep = None
+            if i < len(self._segs) - 1:
+                sep = QLabel("›", self.area)
+                sep.setObjectName("crumbsep")
+                sep.setAlignment(Qt.AlignCenter)
+            self._items.append((btn, sep))
+        self._layout_crumbs()
+        self._sync_mode()
+
+    def _layout_crumbs(self):
+        w = max(self.width() - self.RIGHT_PAD - 6, 0)
+        h = max(self.height() - 4, 0)
+        self.area.setGeometry(4, 2, w, h)
+        for btn, sep in self._items:
+            btn.ensurePolished()
+            if sep:
+                sep.ensurePolished()
+        self.ell.ensurePolished()
+        widths = [btn.sizeHint().width() + (8 if sep else 0) for btn, sep in self._items]
+        ell_w = self.ell.sizeHint().width()
+        n = len(widths)
+        start = n - 1                       # 다 안 들어가면 앞쪽을 접고 뒤에서부터 보여줌 (마지막 폴더는 항상 표시)
+        for s in range(n):
+            if sum(widths[s:]) + (ell_w if s else 0) <= w:
+                start = s
+                break
+        self._start = start
+        x = 0
+        self.ell.setVisible(start > 0)
+        if start > 0:
+            self.ell.setGeometry(0, 0, ell_w, h)
+            x = ell_w
+        for i, (btn, sep) in enumerate(self._items):
+            visible = i >= start
+            btn.setVisible(visible)
+            if sep:
+                sep.setVisible(visible)
+            if not visible:
+                continue
+            bw = min(btn.sizeHint().width(), max(w - x, 20))
+            btn.setGeometry(x, 0, bw, h)
+            x += bw
+            if sep:
+                sep.setGeometry(x, 0, 8, h)
+                x += 8
+
+    def _ell_menu(self):
+        m = QMenu(self)
+        for name, p in self._segs[:self._start]:
+            m.addAction(name, lambda p=p: self.crumbClicked.emit(p))
+        m.exec(self.ell.mapToGlobal(self.ell.rect().bottomLeft()))
+
+    def _sync_mode(self):
+        editing = self.hasFocus()
+        self.area.setVisible(not editing)
+        # 버튼 모드에서는 밑에 깔린 입력창 글자가 비쳐 보이지 않게 투명하게
+        self.setStyleSheet("" if editing else "QLineEdit { color: transparent; }")
+
+    def start_edit(self):
+        self.setFocus()
+        self.selectAll()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._layout_crumbs()
+
+    def focusInEvent(self, e):
+        super().focusInEvent(e)
+        self._sync_mode()
+        QTimer.singleShot(0, self.selectAll)
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        if e.reason() != Qt.PopupFocusReason:       # 입력창 우클릭 메뉴가 뜰 때는 편집 중인 내용을 유지
+            self.setText(self._shown)               # 편집하다 그만두면 현재 위치로 되돌림 (Windows 탐색기와 동일)
+            self._sync_mode()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.setText(self._shown)
+            self.escaped.emit()
+            return
+        super().keyPressEvent(e)
+
+
 # ───────────────────────── 패널 (탭 묶음) ─────────────────────────
 class Pane(QFrame):
     activated = Signal(object)
@@ -481,8 +642,11 @@ class Pane(QFrame):
         self.btn_back.clicked.connect(lambda: self.view() and self.view().back())
         self.btn_fwd.clicked.connect(lambda: self.view() and self.view().forward())
         self.btn_up.clicked.connect(lambda: self.view() and self.view().up())
-        self.pathbar = QLineEdit()
+        self.pathbar = PathBar()
         self.pathbar.returnPressed.connect(self._go)
+        self.pathbar.crumbClicked.connect(self._crumb_go)
+        self.pathbar.crumbMiddle.connect(lambda p: self.add_tab(p))
+        self.pathbar.escaped.connect(lambda: self.view() and self.view().setFocus())
         self.star = self.pathbar.addAction(star_icon(False), QLineEdit.TrailingPosition)
         self.star.triggered.connect(lambda: self.main.toggle_bookmark(self.view().path if self.view() else ""))
         self.btn_new = self._nav_btn("+", "새 탭 (Ctrl+T)")
@@ -593,7 +757,7 @@ class Pane(QFrame):
     def _path_changed(self, vid, path):
         self._refresh_tab(vid)
         if self.view() is self.views.get(vid):
-            self.pathbar.setText(path or "내 PC")
+            self.pathbar.set_path(path)
             self.update_star()
             self.statusChanged.emit()
         self.changed.emit()
@@ -603,7 +767,7 @@ class Pane(QFrame):
         v = self.views.get(vid)
         if v:
             self.stack.setCurrentWidget(v)
-            self.pathbar.setText(v.path or "내 PC")
+            self.pathbar.set_path(v.path)
             self.update_star()
             self.statusChanged.emit()
         self.changed.emit()
@@ -675,9 +839,16 @@ class Pane(QFrame):
         elif os.path.isdir(os.path.expandvars(t)):
             v.navigate(os.path.expandvars(t))
         else:
-            self.pathbar.setText(v.path or "내 PC")
+            self.pathbar.set_path(v.path)
             self.main.say("존재하지 않는 경로입니다")
         v.setFocus()
+
+    def _crumb_go(self, path):
+        """경로줄의 폴더 이름(빵 부스러기)을 클릭 → 그 폴더로 이동"""
+        v = self.view()
+        if v:
+            v.navigate(path)
+            v.setFocus()
 
     def set_active(self, on, split=None):
         """on: 활성 여부, split: 2개 보기 중인지 (표시 스타일용)"""
