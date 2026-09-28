@@ -80,9 +80,16 @@ def main():
 
     # 검색 결과의 폴더는 같은 탭 안에서 들어가고, ◀ 뒤로 = 검색 결과로 복귀 (탭이 늘어나지 않음)
     page.query.setText("deep")
-    wait_for(lambda: page.tree.topLevelItemCount() >= 1, "폴더 검색 결과")
+
+    def deep_row():
+        for i in range(page.tree.topLevelItemCount()):
+            it = page.tree.topLevelItem(i)
+            if it.text(0) == "deep":                              # 이전 검색(report)의 남은 결과가 아니라 실제 'deep' 폴더 행
+                return it.data(0, 0x100)
+        return None
+    wait_for(lambda: deep_row() is not None, "'deep' 폴더 검색 결과")
     n_tabs = w.active.tabbar.count()
-    folder_row = [r for r in page.tree.selected_results() or [page.tree.current_result()] if r][0]
+    folder_row = deep_row()
     w.open_search_result(w.active, folder_row[0], True)
     pump(300)
     v = w.active_view()
