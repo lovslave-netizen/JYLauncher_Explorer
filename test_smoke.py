@@ -97,25 +97,6 @@ def main():
     wait_for(lambda: page.query.text() == "report" and page.tree.topLevelItemCount() >= 1, "도구줄 검색창 입력 반영")
     assert w.active.tabbar.count() == n_tabs
 
-    # 새로 만들기: 형식 목록 + 파일/바로 가기 만들기
-    import newmenu
-    types = newmenu.list_types()
-    assert any(t["ext"] == ".txt" for t in types) and any(t["ext"] == ".ahk" for t in types)
-    txt = next(t for t in types if t["ext"] == ".txt")
-    made = newmenu.create_file(root, txt)
-    assert os.path.exists(made) and made.endswith(".txt")
-    made2 = newmenu.create_file(root, txt)
-    assert made2 != made and os.path.exists(made2)                     # 이름 겹치면 (2)
-    url = newmenu.create_shortcut(root, "https://example.com/a")
-    assert url and url.endswith(".url") and "URL=https://example.com/a" in open(url, encoding="utf-8").read()
-    # 윈도우 메뉴에 하위 메뉴 + 아이콘 넣기 (열지는 않고 만들기만)
-    import shellmenu as SM
-    m = SM.ShellMenu([], root)
-    icon = w._menu_icon(w._new_items(w.active_view())[0][1])
-    m.add_custom([("sub", "새로 만들기", [(SM.CUSTOM_BASE, "폴더", icon), (SM.CUSTOM_BASE + 1, "텍스트", None)])])
-    import win32gui
-    assert win32gui.GetSubMenu(m.hmenu, 0) != 0
-    m.close()
     w.save_session()
     print("explorer smoke OK", flush=True)
 

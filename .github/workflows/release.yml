@@ -50,6 +50,10 @@ jobs:
         shell: pwsh
         run: python test_everything_ini.py
 
+      - name: 테스트 - 새로 만들기 메뉴
+        shell: pwsh
+        run: python test_newmenu.py
+
       - name: 테스트 - 화면 스모크
         shell: pwsh
         run: python test_smoke.py
