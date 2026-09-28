@@ -3553,6 +3553,8 @@ class Main(QMainWindow):
         s.setCheckable(True)
         s.setChecked(startup_enabled())
         s.triggered.connect(self.toggle_startup)
+        m.addSeparator()
+        m.addAction("검색 색인 (Everything)…", self.open_index_dialog)
         u = getattr(self, "updater", None)
         if u:
             m.addSeparator()
@@ -3563,6 +3565,10 @@ class Main(QMainWindow):
             ua.setChecked(u.auto)
             ua.triggered.connect(lambda v: u.set_auto(v))
         m.exec(self.opt_btn.mapToGlobal(self.opt_btn.rect().bottomLeft()))
+
+    def open_index_dialog(self):
+        """설정 → 검색 색인: Everything 이 색인한 볼륨/폴더를 보고 폴더 색인을 추가/제거 (없으면 설치 안내)"""
+        SUI.IndexDialog(self).exec()
 
     def toggle_win_e(self):
         self.data["win_e"] = not self.data.get("win_e", True)

@@ -309,16 +309,80 @@ def start_everything(wait=8.0):
     c = Searcher.client()
     if c.available():
         return True
-    try:
-        subprocess.Popen([exe, "-startup"], creationflags=CREATE_NO_WINDOW)
-    except OSError:
-        return False
+    if not user_everything_pids():                 # 이미 떠 있는데 아직 준비 중/응답 없음이면 또 실행하지 않고 기다리기만 함
+        try:
+            subprocess.Popen([exe, "-startup"], creationflags=CREATE_NO_WINDOW)
+        except OSError:
+            return False
     end = time.monotonic() + wait
     while time.monotonic() < end:
         if c.available():
             return True
         time.sleep(0.4)
     return c.available()
+
+
+def user_everything_pids():
+    """사용자 세션에서 실행 중인 Everything.exe 프로세스 id (서비스는 세션 0 이라 제외)"""
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                            "Get-CimInstance Win32_Process -Filter \"Name='Everything.exe'\" | "
+                            "Where-Object { $_.SessionId -ne 0 } | ForEach-Object { $_.ProcessId }"],
+                           capture_output=True, text=True, errors="ignore", creationflags=CREATE_NO_WINDOW, timeout=30)
+        return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+
+
+def stop_everything(wait=20.0):
+    """Everything 을 종료하고 프로세스가 사라질 때까지 기다림. 관리자 권한으로 떠 있어 종료할 수 없으면 False"""
+    exe = find_everything_exe()
+    if not exe:
+        return True
+    if not user_everything_pids():
+        return True
+    try:
+        subprocess.run([exe, "-exit"], creationflags=CREATE_NO_WINDOW, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        if not user_everything_pids():
+            return True
+        time.sleep(0.7)
+    return False
+
+
+def change_index(mutate, log=None):
+    """Everything.ini 의 색인 설정을 안전하게 바꿈: 종료 → (백업 후) mutate(IniText) 로 수정 → 다시 시작.
+    mutate 는 성공 메시지(str)를 돌려주거나, 바꿀 게 없으면 None, 실패면 예외(ValueError). (성공 여부, 메시지) 를 돌려줌"""
+    import everything_ini as EI
+
+    def say(m):
+        if log:
+            log(m)
+    exe, path = find_everything_exe(), EI.find_ini()
+    if not exe or not path:
+        return False, "Everything 이 설치돼 있지 않습니다"
+    say("Everything 을 잠시 종료합니다…")
+    if not stop_everything():
+        return False, ("Everything 을 종료하지 못했습니다. 관리자 권한으로 실행 중이면 작업 표시줄 트레이의 Everything 아이콘 → "
+                       "Exit(종료) 로 직접 끈 뒤 다시 시도해 주세요")
+    result = (True, "")
+    try:
+        ini, bom = EI.read_ini(path)
+        msg = mutate(ini)
+        if msg is None:
+            result = (True, "변경할 내용이 없습니다")
+        else:
+            backup = EI.write_ini(path, ini, bom)
+            result = (True, f"{msg}  (이전 설정은 {Path(backup).name} 로 백업됨)")
+    except (ValueError, OSError) as e:
+        result = (False, str(e))
+    finally:
+        say("Everything 을 다시 시작합니다…")
+        start_everything(30)
+    return result
 
 
 def install_everything(log=None):

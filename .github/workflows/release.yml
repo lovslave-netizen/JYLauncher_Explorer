@@ -35,6 +35,8 @@ jobs:
         run: |
           python test_updater.py
           python test_search.py
+          python test_everything_ini.py
+          python test_smoke.py
 
       - name: Inno Setup 준비
         shell: pwsh

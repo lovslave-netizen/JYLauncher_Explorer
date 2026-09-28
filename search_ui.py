@@ -8,7 +8,8 @@ import time
 
 from PySide6.QtCore import QFileInfo, QObject, Qt, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import (QFileIconProvider, QHeaderView, QMessageBox, QTreeWidget, QTreeWidgetItem)
+from PySide6.QtWidgets import (QDialog, QFileDialog, QFileIconProvider, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 import filesearch as FS
 from jycommon import DATA_DIR, load_json, save_json
@@ -125,6 +126,168 @@ class ResultsTree(QTreeWidget):
             self.setCurrentItem(it)
         d = it.data(0, Qt.UserRole)
         self.menuRequested.emit(d[0], d[1], self.viewport().mapToGlobal(pos))
+
+
+class IndexDialog(QDialog):
+    """설정 → 검색 색인: Everything 이 색인 중인 볼륨/폴더를 보여주고, 폴더 색인을 추가/제거한다.
+    Everything 이 없으면 설치를 권함. (색인 변경은 Everything 을 잠시 종료했다가 다시 켜는 방식 — ini 백업 후 수정)"""
+    _done = Signal(bool, str)                    # 작업 스레드 → GUI
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        import everything_ini as EI
+        self.EI = EI
+        self.setWindowTitle("검색 색인 (Everything)")
+        self.setMinimumSize(640, 480)
+        self.busy = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(8)
+        self.state = QLabel("")
+        self.state.setWordWrap(True)
+        lay.addWidget(self.state)
+        info = QLabel("Everything 이 색인한 위치가 검색 대상입니다. NTFS 드라이브(C:, D: …)는 자동으로 전체가 색인되고, "
+                      "네트워크 드라이브/폴더(W:\\, Z:\\, \\\\서버\\공유)는 '폴더 색인'으로 추가해야 검색됩니다.")
+        info.setObjectName("dim")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        self.list = QListWidget()
+        lay.addWidget(self.list, 1)
+        self.msg = QLabel("")
+        self.msg.setWordWrap(True)
+        lay.addWidget(self.msg)
+        row = QHBoxLayout()
+        self.b_add = QPushButton("폴더 추가…")
+        self.b_net = QPushButton("네트워크 경로 추가…")
+        self.b_del = QPushButton("선택한 폴더 색인 제거")
+        self.b_inst = QPushButton("Everything 설치")
+        self.b_inst.setObjectName("accent")
+        close = QPushButton("닫기")
+        self.b_add.clicked.connect(self.add_folder)
+        self.b_net.clicked.connect(self.add_network)
+        self.b_del.clicked.connect(self.remove_selected)
+        self.b_inst.clicked.connect(self.install)
+        close.clicked.connect(self.accept)
+        for b in (self.b_add, self.b_net, self.b_del, self.b_inst):
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(close)
+        lay.addLayout(row)
+        self._done.connect(self._on_done)
+        self.reload()
+
+    # ---- 화면 ----
+    def reload(self):
+        EI = self.EI
+        self.list.clear()
+        st = FS.Searcher.status()
+        self.state.setText({"ready": "상태: Everything 연결됨 — 검색 탭에서 색인 전체를 즉시 검색할 수 있습니다",
+                            "elevated": "상태: Everything 이 관리자 권한으로 실행 중이라 이 프로그램이 연결할 수 없습니다 "
+                                        "(검색 탭을 처음 열 때 자동 설정을 안내합니다)",
+                            "not_running": "상태: Everything 이 실행 중이 아니거나 색인을 불러오는 중입니다",
+                            "missing": "상태: Everything 이 설치돼 있지 않습니다. 설치하면 색인 목록을 보고 관리할 수 있고 "
+                                       "파일 검색이 매우 빨라집니다 (무료, 가벼움)"}[st])
+        installed = bool(FS.find_everything_exe())
+        path = EI.find_ini() if installed else None
+        self.b_inst.setVisible(not installed)
+        for b in (self.b_add, self.b_net, self.b_del):
+            b.setEnabled(installed and path is not None and not self.busy)
+            b.setVisible(installed)
+        if not installed or path is None:
+            self.list.addItem("(Everything 이 설치돼 있지 않아 색인 목록이 없습니다)")
+            return
+        try:
+            ini, _bom = EI.read_ini(path)
+            idx = EI.read_index(ini)
+        except OSError as e:
+            self.list.addItem(f"(설정 파일을 읽을 수 없습니다: {e})")
+            return
+        for p, inc, mon in idx["volumes"]:
+            it = QListWidgetItem(f"[드라이브]  {p}    NTFS/ReFS 볼륨 " + ("· 자동 색인" if inc else "· 제외됨") + (" · 변경 감시" if mon and inc else ""))
+            it.setData(Qt.UserRole, None)
+            self.list.addItem(it)
+        for p, mon in idx["folders"]:
+            it = QListWidgetItem(f"[폴더]      {p}    폴더 색인" + (" · 변경 감시" if mon else ""))
+            it.setData(Qt.UserRole, p)
+            self.list.addItem(it)
+        if not idx["folders"]:
+            self.list.addItem("(폴더 색인이 없습니다 — 네트워크 드라이브는 '폴더 추가'로 넣어야 검색됩니다)")
+
+    def _set_busy(self, on, text=""):
+        self.busy = on
+        self.msg.setText(text)
+        for b in (self.b_add, self.b_net, self.b_del, self.b_inst):
+            b.setEnabled(not on)
+
+    # ---- 동작 ----
+    def _confirm_restart(self):
+        return QMessageBox.question(self, "Everything 다시 시작",
+                                    "색인을 바꾸려면 Everything 을 잠시 종료했다가 다시 켭니다.\n"
+                                    "(설정 파일은 먼저 자동 백업됩니다. 새 폴더는 켜진 뒤 백그라운드에서 색인됩니다)\n\n계속할까요?") == QMessageBox.Yes
+
+    def _run_change(self, mutate, busy_text):
+        if not self._confirm_restart():
+            return
+        self._set_busy(True, busy_text)
+
+        def work():
+            try:
+                ok, m = FS.change_index(mutate, log=lambda t: self._done.emit(True, "…" + t))
+            except Exception as e:
+                ok, m = False, str(e)
+            self._done.emit(ok, "!" + m if not ok else "완료: " + m)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_done(self, ok, text):
+        if text.startswith("…"):                     # 진행 메시지
+            self.msg.setText(text[1:])
+            return
+        self._set_busy(False, text.lstrip("!"))
+        self.reload()
+
+    def _add(self, path):
+        EI = self.EI
+        path = EI.normalize_folder(path)
+        try:
+            ini, _b = EI.read_ini(EI.find_ini())
+            vol = EI.covered_by_volume(ini, path)
+        except OSError as e:
+            QMessageBox.warning(self, "색인", str(e))
+            return
+        if vol:
+            QMessageBox.information(self, "이미 색인됨", f"{path} 는 이미 {vol} 드라이브 전체가 색인되고 있어서 따로 추가할 필요가 없습니다.")
+            return
+        self._run_change(lambda ini: f"폴더 색인 추가: {path}" if EI.add_folder(ini, path) else None, "색인을 추가하는 중…")
+
+    def add_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "색인에 추가할 폴더", "")
+        if d:
+            self._add(d)
+
+    def add_network(self):
+        t, ok = QInputDialog.getText(self, "네트워크 경로 추가", "경로 (예: \\\\서버\\공유  또는  Z:\\):")
+        if ok and t.strip():
+            self._add(t.strip().strip('"'))
+
+    def remove_selected(self):
+        it = self.list.currentItem()
+        p = it.data(Qt.UserRole) if it else None
+        if not p:
+            QMessageBox.information(self, "색인 제거", "제거할 '[폴더]' 항목을 선택하세요. (드라이브 볼륨은 Everything 설정에서 관리합니다)")
+            return
+        EI = self.EI
+        self._run_change(lambda ini: f"폴더 색인 제거: {p}" if EI.remove_folder(ini, p) else None, "색인을 제거하는 중…")
+
+    def install(self):
+        self._set_busy(True, "Everything 설치 중… (관리자 권한 확인창이 뜨면 '예')")
+
+        def work():
+            try:
+                ok = FS.install_everything(lambda t: self._done.emit(True, "…" + t))
+            except Exception:
+                ok = False
+            self._done.emit(ok, "완료: Everything 설치됨" if ok else "!설치하지 못했습니다 (https://www.voidtools.com 에서 직접 설치할 수도 있습니다)")
+        threading.Thread(target=work, daemon=True).start()
 
 
 class EverythingGuard(QObject):

@@ -71,3 +71,7 @@ sp.app_btn.setChecked(True)
 pump(3500)
 assert sp.apps is not None                               # 앱 색인이 만들어짐 (개수는 PC 마다 다름)
 print("launcher smoke OK")
+
+# 종료 시 백그라운드 스레드(검색/앱 색인)와 Qt 객체 파괴 순서 때문에 나는 접근 위반(0xC0000005)을 피하려고 바로 종료
+sys.stdout.flush()
+os._exit(0)
