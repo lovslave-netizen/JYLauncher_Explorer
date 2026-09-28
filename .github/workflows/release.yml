@@ -1,0 +1,51 @@
+name: release
+
+# 릴리스 방법: version.py 의 __version__ 을 올리고 커밋 → 같은 번호의 태그를 push
+#   git tag v0.1.1 ; git push origin v0.1.1
+# 그러면 설치 파일(JYTools-Setup-x.y.z.exe)과 .sha256 이 GitHub Releases 에 올라가고,
+# 설치된 프로그램들이 하루 1회 확인해서 업데이트를 안내한다.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: 태그와 version.py 일치 확인
+        shell: pwsh
+        run: |
+          pip install -r requirements-dev.txt
+          $v = (python -c "from version import __version__ as v; print(v)").Trim()
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "태그($env:GITHUB_REF_NAME)와 version.py($v)가 다릅니다" }
+
+      - name: 업데이터 테스트
+        shell: pwsh
+        run: python test_updater.py
+
+      - name: Inno Setup 준비
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: 빌드 (exe + 설치 파일)
+        shell: pwsh
+        run: ./build.ps1 -Installer
+
+      - name: 릴리스 업로드
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist_installer/JYTools-Setup-*.exe dist_installer/JYTools-Setup-*.exe.sha256 --title $env:GITHUB_REF_NAME --generate-notes

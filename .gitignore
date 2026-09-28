@@ -1,0 +1,21 @@
+# 빌드 결과
+build/
+dist/
+dist_installer/
+*.spec.bak
+__pycache__/
+*.pyc
+
+# 개인 데이터 (원래 %APPDATA%\JYTools 에 저장되지만 개발 중 폴더 옆에 생긴 것 방지)
+launcher.json
+vault.json
+settings.json
+bookmarks.json
+explorer.json
+startup_log.txt
+data/
+portable.txt
+backup/
+
+# 이동용 압축 파일
+*.zip
