@@ -58,6 +58,47 @@ def find_everything_exe():
     return None
 
 
+def edition_from_names(names):
+    """제어판(프로그램 목록)에 등록된 이름들에서 Everything 판본을 판별: 'lite' | 'full' | None"""
+    for n in names:
+        low = (n or "").lower()
+        if low.startswith("everything") and "toolbar" not in low:
+            return "lite" if "lite" in low else "full"
+    return None
+
+
+_edition_cache = {"t": 0.0, "v": None}
+
+
+def everything_edition():
+    """설치된 Everything 판본. 'lite' 는 IPC/SDK 가 제거된 버전이라 다른 프로그램이 연동할 수 없음(voidtools 문서).
+    'full' 은 일반(다국어/영어) 버전, 설치 안 됐으면 None. (레지스트리 조회가 느리므로 1분 캐시)"""
+    now = time.monotonic()
+    if now - _edition_cache["t"] < 60:
+        return _edition_cache["v"]
+    names = []
+    try:
+        import winreg
+        for root, sub in ((winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                          (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                          (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")):
+            try:
+                with winreg.OpenKey(root, sub) as k:
+                    for i in range(winreg.QueryInfoKey(k)[0]):
+                        try:
+                            with winreg.OpenKey(k, winreg.EnumKey(k, i)) as ik:
+                                names.append(winreg.QueryValueEx(ik, "DisplayName")[0])
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+    except ImportError:
+        pass
+    v = edition_from_names(names) or ("full" if find_everything_exe() else None)      # 포터블 등 등록이 없으면 일반 버전으로 가정
+    _edition_cache.update(t=now, v=v)
+    return v
+
+
 class EverythingClient:
     """Everything SDK 래퍼. DLL 은 전역 상태를 쓰므로 질의는 lock 으로 한 번에 하나씩"""
 
@@ -248,6 +289,8 @@ class Searcher(QObject):
         """'ready'(사용 가능) | 'elevated'(관리자 권한으로 실행 중이라 접속 불가) | 'loading'(실행 중이지만 색인을 불러오는 중)
         | 'not_running'(설치됐지만 꺼져 있음) | 'missing'(설치 안 됨)"""
         c = Searcher.client()
+        if everything_edition() == "lite":
+            return "lite"
         if c.blocked_by_elevation():
             return "elevated"
         if c.available():
@@ -257,6 +300,7 @@ class Searcher(QObject):
         return "not_running" if find_everything_exe() else "missing"
 
     REASONS = {"missing": "Everything 이 설치돼 있지 않습니다",
+               "lite": "설치된 Everything 이 Lite 버전이라 다른 프로그램이 검색할 수 없습니다 (Lite 는 외부 연동 기능이 없음 → 일반 버전으로 교체 필요)",
                "elevated": "Everything 이 관리자 권한으로 실행 중이라 연결할 수 없습니다 (설정 → 검색 색인 에서 확인)",
                "loading": "Everything 이 색인을 불러오는 중입니다 (잠시 뒤 다시 검색해 보세요)",
                "not_running": "Everything 이 실행 중이 아닙니다"}
@@ -411,6 +455,26 @@ def change_index(mutate, log=None):
         say("Everything 을 다시 시작합니다…")
         start_everything(30)
     return result
+
+
+def replace_lite_with_full(log=None):
+    """Lite 를 제거하고 일반 버전(winget voidtools.Everything)을 설치한 뒤 서비스/시작 설정 후 실행. 색인 설정(ini)과 DB 는 사용자 폴더에 있어 유지됨.
+    관리자 권한 확인창이 뜸. 성공하면 True"""
+    def say(m):
+        if log:
+            log(m)
+    say("Everything 을 종료하는 중…")
+    stop_everything(8)
+    say("Lite 버전을 제거하는 중… (관리자 권한 확인창이 뜨면 '예')")
+    try:
+        subprocess.run(["winget", "uninstall", "--id", "voidtools.Everything.Lite", "-e", "--silent",
+                        "--accept-source-agreements"], capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _edition_cache["t"] = 0.0
+    if find_everything_exe():
+        return False                                   # 제거되지 않음 (직접 제거 필요)
+    return install_everything(log)
 
 
 def install_everything(log=None):

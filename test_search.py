@@ -42,4 +42,9 @@ apps = [{"name": n, "target": n, "kind": "lnk", "folder": ""} for n in ("Google 
 assert [a["name"] for a in appsearch.filter_apps(apps, "chrome")] == ["Chrome Remote", "Google Chrome"]   # 앞글자 일치 우선
 assert [a["name"] for a in appsearch.filter_apps(apps, "google chr")] == ["Google Chrome"]
 assert appsearch.filter_apps(apps, "") == []
+# Everything 판본 판별 (Lite 는 IPC/SDK 가 없어 연동 불가)
+assert FS.edition_from_names(["Foo", "Everything 1.4.1.1028 Lite (x64)"]) == "lite"
+assert FS.edition_from_names(["Everything 1.4.1.1032 (x64)"]) == "full"
+assert FS.edition_from_names(["Everything Toolbar", "Notepad"]) is None
+assert FS.edition_from_names([]) is None
 print("search tests OK")

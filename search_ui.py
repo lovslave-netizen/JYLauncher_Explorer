@@ -249,13 +249,16 @@ class IndexDialog(QDialog):
         self.b_del = QPushButton("선택한 폴더 색인 제거")
         self.b_inst = QPushButton("Everything 설치")
         self.b_inst.setObjectName("accent")
+        self.b_lite = QPushButton("일반 버전으로 교체")
+        self.b_lite.setObjectName("accent")
+        self.b_lite.clicked.connect(self.replace_lite)
         close = QPushButton("닫기")
         self.b_add.clicked.connect(self.add_folder)
         self.b_net.clicked.connect(self.add_network)
         self.b_del.clicked.connect(self.remove_selected)
         self.b_inst.clicked.connect(self.install)
         close.clicked.connect(self.accept)
-        for b in (self.b_add, self.b_net, self.b_del, self.b_inst):
+        for b in (self.b_add, self.b_net, self.b_del, self.b_inst, self.b_lite):
             row.addWidget(b)
         row.addStretch(1)
         row.addWidget(close)
@@ -271,6 +274,8 @@ class IndexDialog(QDialog):
         self.state.setText({"ready": "상태: Everything 연결됨 — 검색 탭에서 색인 전체를 즉시 검색할 수 있습니다",
                             "elevated": "상태: Everything 이 관리자 권한으로 실행 중이라 이 프로그램이 연결할 수 없습니다 "
                                         "(검색 탭을 처음 열 때 자동 설정을 안내합니다)",
+                            "lite": "상태: 설치된 Everything 이 Lite 버전이라 검색 연동이 불가능합니다 (Lite 는 외부 연동 기능이 없음). "
+                                    "아래 '일반 버전으로 교체'를 누르면 Lite 를 제거하고 일반 버전을 설치합니다 (색인 설정 유지)",
                             "loading": "상태: Everything 이 실행 중이지만 색인을 불러오는 중입니다 (잠시 뒤 새로고침)",
                             "not_running": "상태: Everything 이 실행 중이 아닙니다",
                             "missing": "상태: Everything 이 설치돼 있지 않습니다. 설치하면 색인 목록을 보고 관리할 수 있고 "
@@ -278,6 +283,7 @@ class IndexDialog(QDialog):
         installed = bool(FS.find_everything_exe())
         path = EI.find_ini() if installed else None
         self.b_inst.setVisible(not installed)
+        self.b_lite.setVisible(st == "lite")
         for b in (self.b_add, self.b_net, self.b_del):
             b.setEnabled(installed and path is not None and not self.busy)
             b.setVisible(installed)
@@ -304,7 +310,7 @@ class IndexDialog(QDialog):
     def _set_busy(self, on, text=""):
         self.busy = on
         self.msg.setText(text)
-        for b in (self.b_add, self.b_net, self.b_del, self.b_inst):
+        for b in (self.b_add, self.b_net, self.b_del, self.b_inst, self.b_lite):
             b.setEnabled(not on)
 
     # ---- 동작 ----
@@ -366,6 +372,20 @@ class IndexDialog(QDialog):
         EI = self.EI
         self._run_change(lambda ini: f"폴더 색인 제거: {p}" if EI.remove_folder(ini, p) else None, "색인을 제거하는 중…")
 
+    def replace_lite(self):
+        if QMessageBox.question(self, "일반 버전으로 교체", "Everything Lite 를 제거하고 일반 버전을 설치합니다.\n"
+                                "색인 설정과 데이터는 유지됩니다. (관리자 권한 확인창이 두세 번 뜰 수 있습니다)\n\n계속할까요?") != QMessageBox.Yes:
+            return
+        self._set_busy(True, "Everything 교체 중… (완료될 때까지 기다려 주세요)")
+
+        def work():
+            try:
+                ok = FS.replace_lite_with_full(lambda t: self._done.emit(True, "…" + t))
+            except Exception:
+                ok = False
+            self._done.emit(ok, "완료: 일반 버전으로 교체됨" if ok else "!교체하지 못했습니다 (제어판에서 'Everything Lite' 제거 후 https://www.voidtools.com 에서 일반 버전을 설치해 주세요)")
+        threading.Thread(target=work, daemon=True).start()
+
     def install(self):
         self._set_busy(True, "Everything 설치 중… (관리자 권한 확인창이 뜨면 '예')")
 
@@ -403,6 +423,26 @@ class EverythingGuard(QObject):
         st = FS.Searcher.status()
         if st == "ready":
             self.finished.emit(True)
+            return
+        if st == "lite":
+            if "lite" in self._asked:
+                self.finished.emit(False)
+                return
+            self._asked.add("lite")
+            box = QMessageBox(self.w)
+            box.setWindowTitle("Everything 버전 안내")
+            box.setText("설치된 Everything 이 'Lite' 버전이라 이 프로그램이 검색 요청을 보낼 수 없습니다.")
+            box.setInformativeText("Lite 버전은 다른 프로그램과 연동하는 기능(IPC/SDK)이 제거된 버전입니다.\n"
+                                   "일반 버전(무료, 같은 프로그램)으로 교체하면 검색이 연결됩니다. 색인 설정과 데이터는 그대로 유지됩니다.\n\n"
+                                   "지금 교체할까요? (Lite 제거 → 일반 버전 설치. 관리자 권한 확인창이 두세 번 뜰 수 있습니다)")
+            box.setWindowFlag(Qt.WindowStaysOnTopHint)
+            yes = box.addButton("일반 버전으로 교체", QMessageBox.AcceptRole)
+            box.addButton("나중에", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is yes:
+                self._run_bg(lambda: FS.replace_lite_with_full(self.message.emit), "Everything 을 교체하는 중… (완료될 때까지 기다려 주세요)")
+            else:
+                self.finished.emit(False)
             return
         if st == "loading":                                   # 켜져 있고 색인을 불러오는 중 → 잠깐 기다려 봄
             self._run_bg(lambda: FS.start_everything(25), "Everything 색인을 불러오는 중…")
