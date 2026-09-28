@@ -492,7 +492,7 @@ class FileView(QTreeView):
     def selected_paths(self):
         seen, out = set(), []
         for i in self.selectionModel().selectedRows(0):
-            p = self.model_.filePath(i)
+            p = os.path.normpath(self.model_.filePath(i))          # C:/a/b → C:\\a\\b (복사한 경로를 다른 곳에 붙여넣을 때도 \\)
             if p not in seen:
                 seen.add(p)
                 out.append(p)
@@ -2829,7 +2829,7 @@ class Main(QMainWindow):
     def set_clipboard(self, paths, cut):
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
-        mime.setText("\r\n".join(paths))                     # 텍스트 칸에 붙여넣으면 경로가 들어감 (Windows 11 탐색기와 같은 동작)
+        mime.setText("\r\n".join(os.path.normpath(p) for p in paths))   # 텍스트 칸에 붙여넣으면 경로가 들어감 (Windows 11 탐색기와 같은 동작, 구분자는 \\)
         mime.setData(DROP_EFFECT, QByteArray(struct.pack("<I", 2 if cut else 1)))
         QApplication.clipboard().setMimeData(mime)
         self.clip_paths, self.clip_cut = paths, cut
