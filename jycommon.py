@@ -16,6 +16,9 @@ FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))  # PyInstaller 번들 리소스 위치
 
+# 개발/테스트용: 환경 변수 JY_INSTANCE 를 주면 단일 인스턴스 이름이 달라져서, 이미 설치돼 실행 중인 프로그램과 부딪히지 않음
+INSTANCE_SUFFIX = os.environ.get("JY_INSTANCE", "")
+
 PORTABLE = (APP_DIR / "portable.txt").exists()
 DATA_DIR = (APP_DIR / "data") if PORTABLE else Path(os.environ.get("APPDATA", str(Path.home()))) / "JYTools"
 DATA_DIR.mkdir(parents=True, exist_ok=True)

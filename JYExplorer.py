@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import (QByteArray, QDir, QFileInfo, QItemSelectionModel, QMimeData, QPointF, QModelIndex, QObject, QSize, Qt, QTimer, QUrl,
+from PySide6.QtCore import (QByteArray, QDir, QFileInfo, QItemSelectionModel, QMimeData, QPointF, QModelIndex, QObject, QRectF, QSize, Qt, QTimer, QUrl,
                             Signal)
 from PySide6.QtGui import (QColor, QCursor, QDrag, QGuiApplication, QIcon, QKeySequence, QPainter, QPen,
                            QPixmap, QPolygonF, QShortcut)
@@ -25,16 +25,17 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFileIconProvider, QFileSystemModel, QFrame,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSplitter, QStackedWidget, QTabBar,
-    QSystemTrayIcon, QToolButton, QTreeView, QVBoxLayout, QWidget,
+    QSystemTrayIcon, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 import fileops as F
-from jycommon import (BACKUP_DIR, BOOKMARKS_FILE, EXPLORER_FILE, FROZEN, LAUNCHER_FILE, add_item_to_launcher, app_icon, backup_favorites,
+import mediainfo as MI
+from jycommon import (BACKUP_DIR, BOOKMARKS_FILE, EXPLORER_FILE, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, add_item_to_launcher, app_icon, backup_favorites,
                       load_font, load_json, pick_category, save_json)
 from updater import Updater
 from version import __version__
 
-SERVER_NAME = "JYExplorer-single-instance"
+SERVER_NAME = "JYExplorer-single-instance" + INSTANCE_SUFFIX
 HOME = str(Path.home())
 DROP_EFFECT = 'application/x-qt-windows-mime;value="Preferred DropEffect"'  # 1=복사, 2=이동 (Windows 탐색기와 호환)
 
@@ -60,6 +61,9 @@ QLabel#status { color: #9aa0c4; font-size: 12px; }
 QLineEdit { background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
     padding: 6px 12px; selection-background-color: #7c8cff; }
 QLineEdit:focus { border: 1px solid #7c8cff; background: rgba(124,140,255,0.10); }
+QToolButton#tb { background: transparent; border-radius: 9px; padding: 0; }
+QToolButton#tb:hover { background: rgba(255,255,255,0.15); }
+QToolButton#tb:checked { background: #5b6cff; }
 QPushButton#crumb { background: transparent; padding: 0 7px; border-radius: 6px; }
 QPushButton#crumb:hover { background: rgba(255,255,255,0.16); }
 QLabel#crumbsep { background: transparent; color: #7f86aa; }
@@ -115,7 +119,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
 _provider = QFileIconProvider()
 MIME_BM = "application/x-jy-bookmark"
-LAUNCHER_SERVER = "JYLauncher-single-instance"
+LAUNCHER_SERVER = "JYLauncher-single-instance" + INSTANCE_SUFFIX
 
 
 def dir_exists(path, timeout=5.0):
@@ -189,13 +193,59 @@ def dark_titlebar(widget):
 
 
 # ───────────────────────── 파일 뷰 ─────────────────────────
+_media = None
+
+
+def media_cache():
+    global _media
+    if _media is None:
+        _media = MI.MediaInfoCache()
+    return _media
+
+
 class FSModel(QFileSystemModel):
-    HEADERS = ("이름", "크기", "종류", "수정한 날짜")
+    """기본 4열(이름/크기/확장자/수정한 날짜) + 동영상·음악 정보 열(길이, 해상도, 코덱, 비트레이트 …).
+    추가 열은 화면에 보일 때만 값을 요청하고, 정보는 백그라운드에서 읽어 채운다."""
+    HEADERS = ("이름", "크기", "확장자", "수정한 날짜")
+    N_BASE = 4
+    N_TOTAL = N_BASE + len(MI.COLUMNS)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        media_cache().ready.connect(self._media_ready)
+
+    def columnCount(self, parent=QModelIndex()):
+        return self.N_TOTAL
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole and section < len(self.HEADERS):
-            return self.HEADERS[section]
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            if section < self.N_BASE:
+                return self.HEADERS[section]
+            if section < self.N_TOTAL:
+                return MI.COLUMNS[section - self.N_BASE][1]
         return super().headerData(section, orientation, role)
+
+    def data(self, index, role=Qt.DisplayRole):
+        c = index.column()
+        if c >= self.N_BASE:
+            if role == Qt.DisplayRole:
+                path = self.filePath(index)
+                if not MI.MediaInfoCache.is_media(path):
+                    return ""
+                info = media_cache().get(path)
+                return "" if info is None else info.get(MI.COLUMNS[c - self.N_BASE][0], "")
+            return None
+        if c == 2 and role == Qt.DisplayRole:               # 종류 대신 확장자 (폴더는 '폴더')
+            fi = self.fileInfo(index)
+            if fi.isDir():
+                return "드라이브" if fi.isRoot() else "폴더"
+            return fi.suffix().lower()
+        return super().data(index, role)
+
+    def _media_ready(self, path):
+        idx = self.index(path)
+        if idx.isValid():
+            self.dataChanged.emit(idx.siblingAtColumn(self.N_BASE), idx.siblingAtColumn(self.N_TOTAL - 1), [Qt.DisplayRole])
 
 
 class FileView(QTreeView):
@@ -206,7 +256,11 @@ class FileView(QTreeView):
     keyAction = Signal(str)
     selectionSummary = Signal()
 
-    COLS = {0: 420, 1: 100, 2: 140, 3: 160}      # 열 너비 (모든 탭 공용, 사용자가 바꾸면 explorer.json 에 저장)
+    # 열 설정 (모든 탭 공용, 사용자가 바꾸면 explorer.json 에 저장). 열 번호 = 모델의 논리 열
+    #   0 이름, 1 크기, 2 확장자, 3 수정한 날짜, 4~ 동영상/음악 정보 (mediainfo.COLUMNS 순서)
+    COLS = {0: 420, 1: 100, 2: 90, 3: 160, 4: 80, 5: 110, 6: 130, 7: 130, 8: 130, 9: 70, 10: 120}
+    ORDER = [0, 3, 2, 1] + list(range(4, FSModel.N_TOTAL))    # 화면 순서: 이름 / 수정한 날짜 / 확장자 / 크기
+    HIDDEN = set(range(4, FSModel.N_TOTAL))                   # 기본은 정보 열 숨김 (헤더 우클릭으로 켬)
     on_cols_changed = None
 
     def __init__(self, path, show_hidden=False):
@@ -237,12 +291,16 @@ class FileView(QTreeView):
         self.setExpandsOnDoubleClick(False)
         h = self.header()
         h.setStretchLastSection(True)
-        h.setSectionsMovable(False)
+        h.setSectionsMovable(True)               # 헤더를 끌어 열 순서 변경
         h.setMinimumSectionSize(40)
-        for c, w in self.COLS.items():          # 모든 열을 마우스로 늘이고 줄일 수 있음
-            h.setSectionResizeMode(c, QHeaderView.Interactive)
-            h.resizeSection(c, w)
+        h.setContextMenuPolicy(Qt.CustomContextMenu)
+        h.customContextMenuRequested.connect(self._header_menu)   # 우클릭: 열 추가/제거
+        self._applying = False
+        self._sort = (0, Qt.AscendingOrder)
+        self.apply_columns()
         h.sectionResized.connect(self._col_resized)
+        h.sectionMoved.connect(self._col_moved)
+        h.sortIndicatorChanged.connect(self._sort_changed)
         self.sortByColumn(0, Qt.AscendingOrder)
         # 이름 검색: 폴더 표시 방식 대신 행을 숨김 → 목록이 (비동기로) 채워지거나 바뀔 때마다 다시 적용
         for sig in (self.model_.rowsInserted, self.model_.layoutChanged, self.model_.directoryLoaded):
@@ -252,11 +310,99 @@ class FileView(QTreeView):
         self.itemDelegate().closeEditor.connect(lambda *_: setattr(self, "_edit_closed", time.monotonic()))
         self.navigate(path)
 
+    # ---- 열 (순서 / 표시 / 너비) ----
+    def apply_columns(self):
+        """공용 열 설정(COLS/ORDER/HIDDEN)을 이 뷰에 적용"""
+        h = self.header()
+        self._applying = True
+        try:
+            for c in range(FSModel.N_TOTAL):
+                h.setSectionResizeMode(c, QHeaderView.Interactive)
+                h.resizeSection(c, self.COLS.get(c, 100))
+                self.setColumnHidden(c, c != 0 and c in self.HIDDEN)
+            for pos, c in enumerate(self.ORDER):
+                cur = h.visualIndex(c)
+                if cur != pos:
+                    h.moveSection(cur, pos)
+        finally:
+            self._applying = False
+
+    def _last_visible_logical(self):
+        h = self.header()
+        for v in range(h.count() - 1, -1, -1):
+            c = h.logicalIndex(v)
+            if not h.isSectionHidden(c):
+                return c
+        return 0
+
     def _col_resized(self, col, _old, new):
-        if col < 3 and new != self.COLS[col]:        # 마지막 열은 남는 폭을 채우므로 저장하지 않음
+        if self._applying or self.header().isSectionHidden(col) or col == self._last_visible_logical():
+            return                                   # 마지막(남는 폭을 채우는) 열은 저장하지 않음
+        if new != self.COLS.get(col):
             FileView.COLS[col] = new
-            if FileView.on_cols_changed:
-                FileView.on_cols_changed()
+            self._notify_cols(apply_others=False)
+
+    def _col_moved(self, _logical, _old, _new):
+        h = self.header()
+        if self._applying:
+            return
+        if h.visualIndex(0) != 0:                    # 이름 열은 항상 맨 앞
+            self._applying = True
+            h.moveSection(h.visualIndex(0), 0)
+            self._applying = False
+        FileView.ORDER = [h.logicalIndex(v) for v in range(h.count())]
+        self._notify_cols()
+
+    def _sort_changed(self, col, order):
+        if self._applying:
+            return
+        if col >= FSModel.N_BASE:                    # 정보 열은 정렬 미지원 → 이전 정렬로 되돌림
+            self._applying = True
+            self.header().setSortIndicator(*self._sort)
+            self._applying = False
+        else:
+            self._sort = (col, order)
+
+    def _header_menu(self, pos):
+        m = QMenu(self)
+        names = [self.model_.headerData(c, Qt.Horizontal) for c in range(FSModel.N_TOTAL)]
+
+        def add(c):
+            a = m.addAction(names[c])
+            a.setCheckable(True)
+            a.setChecked(c not in self.HIDDEN)
+            a.setEnabled(c != 0)
+            a.triggered.connect(lambda on, c=c: self._toggle_col(c, on))
+        for c in range(FSModel.N_BASE):
+            add(c)
+        m.addSeparator()
+        t = m.addAction("동영상 · 음악 정보")
+        t.setEnabled(False)
+        for c in range(FSModel.N_BASE, FSModel.N_TOTAL):
+            add(c)
+        if not MI.AVAILABLE:
+            m.addSeparator()
+            m.addAction("(미디어 정보 라이브러리를 불러오지 못해 값이 비어 있습니다)").setEnabled(False)
+        m.addSeparator()
+        m.addAction("열 설정 초기화", self._reset_cols)
+        m.exec(self.header().mapToGlobal(pos))
+
+    def _toggle_col(self, c, on):
+        if on:
+            FileView.HIDDEN.discard(c)
+        else:
+            FileView.HIDDEN.add(c)
+        self._notify_cols()
+
+    def _reset_cols(self):
+        FileView.ORDER = [0, 3, 2, 1] + list(range(FSModel.N_BASE, FSModel.N_TOTAL))
+        FileView.HIDDEN = set(range(FSModel.N_BASE, FSModel.N_TOTAL))
+        FileView.COLS.update({0: 420, 1: 100, 2: 90, 3: 160, 4: 80, 5: 110, 6: 130, 7: 130, 8: 130, 9: 70, 10: 120})
+        self._notify_cols()
+
+    def _notify_cols(self, apply_others=True):
+        if FileView.on_cols_changed:
+            FileView.on_cols_changed(apply_others)
 
     def set_hidden(self, on):
         f = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.System
@@ -513,7 +659,8 @@ class PathBar(QLineEdit):
 
     def set_path(self, path):
         self._shown = path or "내 PC"
-        self.setText(self._shown)
+        if self.hasFocus():
+            self.setText(self._shown)               # 입력 모드일 때만 글자를 채움 (버튼 모드에서는 비워 둬서 겹쳐 보이지 않음)
         for btn, sep in self._items:
             btn.deleteLater()
             if sep:
@@ -583,8 +730,7 @@ class PathBar(QLineEdit):
     def _sync_mode(self):
         editing = self.hasFocus()
         self.area.setVisible(not editing)
-        # 버튼 모드에서는 밑에 깔린 입력창 글자가 비쳐 보이지 않게 투명하게
-        self.setStyleSheet("" if editing else "QLineEdit { color: transparent; }")
+        self.setText(self._shown if editing else "")
 
     def start_edit(self):
         self.setFocus()
@@ -602,13 +748,11 @@ class PathBar(QLineEdit):
     def focusOutEvent(self, e):
         super().focusOutEvent(e)
         if e.reason() != Qt.PopupFocusReason:       # 입력창 우클릭 메뉴가 뜰 때는 편집 중인 내용을 유지
-            self.setText(self._shown)               # 편집하다 그만두면 현재 위치로 되돌림 (Windows 탐색기와 동일)
-            self._sync_mode()
+            self._sync_mode()                       # 편집하다 그만두면 버려지고 다시 폴더 버튼으로 (Windows 탐색기와 동일)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
-            self.setText(self._shown)
-            self.escaped.emit()
+            self.escaped.emit()                     # 뷰로 포커스가 가면 focusOut 에서 버튼 모드로 돌아감
             return
         super().keyPressEvent(e)
 
@@ -753,9 +897,12 @@ class Pane(QFrame):
         on = bool(v) and self.main.is_bookmarked(v.path)
         self.star.setIcon(star_icon(on))
         self.star.setToolTip("북마크 해제 (Ctrl+D)" if on else "이 폴더를 북마크에 추가 (Ctrl+D)")
+        if self.main.active is self:
+            self.main.update_toolbar_star()
 
     def _path_changed(self, vid, path):
         self._refresh_tab(vid)
+        self.main.record_visit(path)
         if self.view() is self.views.get(vid):
             self.pathbar.set_path(path)
             self.update_star()
@@ -950,8 +1097,6 @@ class QuickList(QListWidget):
         for d in QDir.drives():
             p = d.absolutePath().replace("/", "\\")
             add(drive_label(p), p, _provider.icon(QFileInfo(p)), tip=p)
-        row = max(self.sizeHintForRow(0), 26)
-        self.setFixedHeight(min(self.count(), 16) * row + 12)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
 
@@ -1068,9 +1213,9 @@ class BookmarksBar(QFrame):
         self.add_btn = QPushButton("+", self)
         self.add_btn.setObjectName("bm")
         self.add_btn.setFocusPolicy(Qt.NoFocus)
-        self.add_btn.setToolTip("북마크 추가")
+        self.add_btn.setToolTip("양쪽 패널 세트 추가")
         self.add_btn.clicked.connect(lambda: self.menuAt.emit(None, self.add_btn.mapToGlobal(self.add_btn.rect().bottomLeft())))
-        self.hint = QLabel("북마크가 없습니다 — 경로줄 오른쪽 별이나 오른쪽 + 로 추가하세요", self)
+        self.hint = QLabel("세트 북마크: 2개 보기로 양쪽에 폴더를 연 뒤 오른쪽 + (또는 Ctrl+Shift+D)로 저장하면 여기에 표시됩니다", self)
         self.hint.setObjectName("dim")
         self._hidden = []
 
@@ -1082,7 +1227,7 @@ class BookmarksBar(QFrame):
         for b, _ in self.items:
             b.deleteLater()
         self.items = []
-        for n in self.root["children"]:
+        for n in [x for x in self._leaves(self.root["children"]) if x.get("path2")]:      # 이 바에는 세트(폴더 2개)만 표시
             b = BmButton(self)
             b.setObjectName("bm")
             b.setFocusPolicy(Qt.NoFocus)
@@ -1235,8 +1380,8 @@ class BookmarksBar(QFrame):
                 b.style().polish(b)
 
     def _accepts(self, e):
-        m = e.mimeData()
-        return m.hasUrls() or m.hasFormat(MIME_BM)
+        # 이 바 안에서 세트를 끌어 순서를 바꾸는 것만 받음 (일반 북마크/폴더는 왼쪽 트리로)
+        return e.mimeData().hasFormat(MIME_BM) and self._drag is not None
 
     def dragEnterEvent(self, e):
         e.acceptProposedAction() if self._accepts(e) else e.ignore()
@@ -1247,10 +1392,7 @@ class BookmarksBar(QFrame):
             return
         e.acceptProposedAction()
         b, n, zone = self._zone_at(e.position().toPoint())
-        if e.mimeData().hasFormat(MIME_BM):
-            self._mark(b, zone)
-        else:
-            self._mark(b if n is not None and n["type"] == "folder" else None, "group")
+        self._mark(b, "after" if zone == "group" else zone)
 
     def dragLeaveEvent(self, e):
         self._mark(None, "")
@@ -1258,15 +1400,302 @@ class BookmarksBar(QFrame):
     def dropEvent(self, e):
         b, n, zone = self._zone_at(e.position().toPoint())
         self._mark(None, "")
-        e.setDropAction(Qt.MoveAction if e.mimeData().hasFormat(MIME_BM) else Qt.CopyAction)
+        if not self._accepts(e):
+            e.ignore()
+            return
+        e.setDropAction(Qt.MoveAction)
+        e.accept()
+        self.nodeDropped.emit(self._drag, n, "after" if zone == "group" else zone)
+
+
+# ───────────────────────── 도구줄 아이콘 (폰트에 의존하지 않고 직접 그림) ─────────────────────────
+_ICON_COLOR = QColor("#e8eaf6")
+
+
+def _canvas():
+    pm = QPixmap(44, 44)
+    pm.fill(Qt.transparent)
+    pt = QPainter(pm)
+    pt.setRenderHint(QPainter.Antialiasing)
+    return pm, pt
+
+
+def view_icon(two):
+    """1개 보기 = □, 2개 보기 = □|□"""
+    pm, pt = _canvas()
+    pt.setPen(QPen(_ICON_COLOR, 3.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    pt.setBrush(Qt.NoBrush)
+    pt.drawRoundedRect(QRectF(5, 9, 34, 26), 5, 5)
+    if two:
+        pt.drawLine(22, 10, 22, 34)
+    pt.end()
+    return QIcon(pm)
+
+
+def gear_icon():
+    pm, pt = _canvas()
+    pt.translate(22, 22)
+    pt.setPen(Qt.NoPen)
+    pt.setBrush(_ICON_COLOR)
+    for _ in range(8):
+        pt.rotate(45)
+        pt.drawRoundedRect(QRectF(-3.6, -19, 7.2, 9), 1.8, 1.8)
+    pt.drawEllipse(QPointF(0, 0), 13.5, 13.5)
+    pt.setCompositionMode(QPainter.CompositionMode_Clear)
+    pt.drawEllipse(QPointF(0, 0), 6, 6)
+    pt.end()
+    return QIcon(pm)
+
+
+def workspace_icon():
+    """작업공간 = 겹쳐진 창 3개"""
+    pm, pt = _canvas()
+    pt.setPen(QPen(_ICON_COLOR, 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    pt.setBrush(Qt.NoBrush)
+    for x, y in ((14, 5), (9, 12), (4, 19)):
+        pt.drawRoundedRect(QRectF(x, y, 26, 19), 3.5, 3.5)
+    pt.drawLine(4, 25, 30, 25)
+    pt.end()
+    return QIcon(pm)
+
+
+def chevron_icon(kind):
+    """트리 접기/펼치기 표시: 'closed' ▸ / 'open' ▾ / 'none' 빈 자리 (글꼴 글자를 쓰지 않으려고 직접 그림)"""
+    pm = QPixmap(14, 18)
+    pm.fill(Qt.transparent)
+    if kind != "none":
+        pt = QPainter(pm)
+        pt.setRenderHint(QPainter.Antialiasing)
+        pt.setPen(QPen(QColor("#9aa0c4"), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        if kind == "closed":
+            pt.drawPolyline(QPolygonF([QPointF(5, 4.5), QPointF(9.5, 9), QPointF(5, 13.5)]))
+        else:
+            pt.drawPolyline(QPolygonF([QPointF(3, 6.5), QPointF(7, 11), QPointF(11, 6.5)]))
+        pt.end()
+    return pm
+
+
+def tree_icon(kind, base):
+    """[접기 표시] + [폴더 아이콘] 을 한 아이콘으로 합침 (kind: closed/open/none)"""
+    key = (kind, base)
+    if key in _tree_icons:
+        return _tree_icons[key]
+    ch = chevron_icon(kind)
+    pm = QPixmap(36 if base else 14, 18)
+    pm.fill(Qt.transparent)
+    pt = QPainter(pm)
+    pt.drawPixmap(0, 0, ch)
+    if base:
+        pt.drawPixmap(16, 0, _provider.icon(QFileIconProvider.Folder).pixmap(QSize(18, 18)))
+    pt.end()
+    _tree_icons[key] = QIcon(pm)
+    return _tree_icons[key]
+
+
+_tree_icons = {}
+
+
+# ───────────────────────── 왼쪽 아래 트리: 북마크 / 최근 / 자주 가는 곳 ─────────────────────────
+SIDE_SECTIONS = (("bm", "북마크"), ("recent", "최근"), ("freq", "자주 가는 곳"))
+
+
+class SideTree(QTreeWidget):
+    """북마크(폴더 안의 폴더까지), 최근, 자주 가는 곳을 접고 펼치는 트리.
+    항목 데이터: ('section', 키) / ('bm', 노드) / ('path', 경로, 출처)"""
+    openPath = Signal(str, bool)                 # 경로, 새 탭 여부
+    openFolderAsTabs = Signal(object)            # 북마크 폴더 노드
+    menuAt = Signal(str, object, object)         # 종류('section'|'bm'|'path'), 데이터, 전역 좌표
+    nodeDropped = Signal(object, object, str)    # 끌어온 노드, 대상 노드(None=맨 끝), 위치(before/after/group/end)
+    dirsDropped = Signal(list, object)           # 폴더 경로들, 넣을 북마크 폴더 노드(None=맨 위 단계)
+    stateChanged = Signal()                      # 접기/펼치기 상태가 바뀜(저장 필요)
+
+    def __init__(self):
+        super().__init__()
+        self.setHeaderHidden(True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setRootIsDecorated(False)
+        self.setIndentation(14)
+        self.setIconSize(QSize(36, 18))
+        self.setExpandsOnDoubleClick(False)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+        self.itemClicked.connect(self._clicked)
+        self.itemExpanded.connect(lambda it: self._expanded(it, True))
+        self.itemCollapsed.connect(lambda it: self._expanded(it, False))
+        self._drag = None
+        self._open = {}
+
+    # ---- 만들기 ----
+    def build(self, root, recent, freq, open_state):
+        self._open = open_state
+        self.blockSignals(True)
+        self.clear()
+        for key, title in SIDE_SECTIONS:
+            sec = QTreeWidgetItem([title])
+            sec.setData(0, Qt.UserRole, ("section", key))
+            f = sec.font(0)
+            f.setBold(True)
+            sec.setFont(0, f)
+            sec.setFlags((sec.flags() | Qt.ItemIsDropEnabled) if key == "bm" else (sec.flags() & ~Qt.ItemIsDropEnabled))
+            self.addTopLevelItem(sec)
+            if key == "bm":
+                self._add_nodes(sec, root["children"])
+            else:
+                for p in (recent if key == "recent" else freq):
+                    self._add_path(sec, p, key)
+            if sec.childCount() == 0:
+                ph = QTreeWidgetItem(["(비어 있음)"])
+                ph.setFlags(Qt.NoItemFlags)
+                ph.setIcon(0, tree_icon("none", False))
+                sec.addChild(ph)
+            sec.setExpanded(open_state.get(key, True))
+            sec.setIcon(0, tree_icon("open" if sec.isExpanded() else "closed", False))
+        self.blockSignals(False)
+
+    def _add_nodes(self, parent, kids):
+        for n in kids:
+            if n.get("path2"):                   # 세트 북마크는 위쪽 바에서만 보여줌
+                continue
+            it = QTreeWidgetItem([n["name"]])
+            it.setData(0, Qt.UserRole, ("bm", n))
+            if n["type"] == "folder":
+                parent.addChild(it)
+                self._add_nodes(it, n["children"])
+                it.setToolTip(0, n["name"])
+                it.setExpanded(bool(n.get("open")) and it.childCount() > 0)
+                it.setIcon(0, tree_icon("open" if it.isExpanded() else "closed", True))
+            else:
+                it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)
+                it.setIcon(0, tree_icon("none", True))
+                it.setToolTip(0, n["name"] + "\n" + n["path"])
+                parent.addChild(it)
+
+    def _add_path(self, parent, p, src):
+        it = QTreeWidgetItem([tab_title(p)])
+        it.setData(0, Qt.UserRole, ("path", p, src))
+        it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)
+        it.setIcon(0, tree_icon("none", True))
+        it.setToolTip(0, p)
+        parent.addChild(it)
+
+    # ---- 동작 ----
+    def _expanded(self, it, on):
+        d = it.data(0, Qt.UserRole)
+        if not d:
+            return
+        if d[0] == "section":
+            it.setIcon(0, tree_icon("open" if on else "closed", False))
+            self._open[d[1]] = on
+        elif d[0] == "bm" and d[1]["type"] == "folder":
+            it.setIcon(0, tree_icon("open" if on else "closed", True))
+            d[1]["open"] = on
+        self.stateChanged.emit()
+
+    def _clicked(self, it, _col):
+        d = it.data(0, Qt.UserRole)
+        if not d:
+            return
+        if d[0] == "path" or (d[0] == "bm" and d[1]["type"] == "bookmark"):
+            self.openPath.emit(d[1] if d[0] == "path" else d[1]["path"], False)
+        else:                                    # 섹션/북마크 폴더: 접기 ↔ 펼치기
+            it.setExpanded(not it.isExpanded())
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MiddleButton:
+            it = self.itemAt(e.position().toPoint())
+            d = it.data(0, Qt.UserRole) if it else None
+            if d and d[0] == "path":
+                self.openPath.emit(d[1], True)
+            elif d and d[0] == "bm":
+                if d[1]["type"] == "folder":
+                    self.openFolderAsTabs.emit(d[1])
+                else:
+                    self.openPath.emit(d[1]["path"], True)
+            return
+        super().mouseReleaseEvent(e)
+
+    def _menu(self, pos):
+        it = self.itemAt(pos)
+        d = it.data(0, Qt.UserRole) if it else None
+        gp = self.viewport().mapToGlobal(pos)
+        if d is None:
+            self.menuAt.emit("section", "bm", gp)          # 빈 곳 = 북마크 메뉴
+        elif d[0] == "section":
+            self.menuAt.emit("section", d[1], gp)
+        elif d[0] == "bm":
+            self.menuAt.emit("bm", d[1], gp)
+        else:
+            self.menuAt.emit("path", (d[1], d[2]), gp)
+
+    # ---- 드래그 & 드롭: 북마크 정리(순서/폴더 안으로), 폴더를 끌어다 북마크로 추가 ----
+    def startDrag(self, actions):
+        it = self.currentItem()
+        d = it.data(0, Qt.UserRole) if it else None
+        if not d or d[0] not in ("bm", "path"):
+            return
+        mime = QMimeData()
+        if d[0] == "bm":
+            mime.setData(MIME_BM, b"1")
+            self._drag = d[1]
+        else:
+            mime.setUrls([QUrl.fromLocalFile(d[1])])
+            self._drag = None
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction | Qt.CopyAction, Qt.MoveAction)
+        self._drag = None
+
+    def _target(self, pos):
+        """(대상 노드 또는 None, 위치) 또는 놓을 수 없으면 None. 위치: before / after / group(폴더 안으로) / end(북마크 맨 끝)"""
+        it = self.itemAt(pos)
+        if it is None:
+            return (None, "end")
+        d = it.data(0, Qt.UserRole)
+        if not d:
+            return None
+        if d[0] == "section":
+            return (None, "end") if d[1] == "bm" else None
+        if d[0] != "bm":
+            return None
+        r = self.visualItemRect(it)
+        y = (pos.y() - r.top()) / max(r.height(), 1)
+        if d[1]["type"] == "folder":
+            return (d[1], "before" if y < 0.25 else "after" if y > 0.75 and not it.isExpanded() else "group")
+        return (d[1], "before" if y < 0.5 else "after")
+
+    def _accepts(self, e):
+        m = e.mimeData()
+        return (m.hasFormat(MIME_BM) and self._drag is not None) or (m.hasUrls() and not m.hasFormat(MIME_BM))
+
+    def dragEnterEvent(self, e):
+        e.acceptProposedAction() if self._accepts(e) else e.ignore()
+
+    def dragMoveEvent(self, e):
+        if self._accepts(e) and self._target(e.position().toPoint()) is not None:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        t = self._target(e.position().toPoint())
+        if not self._accepts(e) or t is None:
+            e.ignore()
+            return
+        node, zone = t
+        e.setDropAction(Qt.MoveAction)
         e.accept()
         if e.mimeData().hasFormat(MIME_BM):
-            if self._drag is not None:
-                self.nodeDropped.emit(self._drag, n, zone)
+            if self._drag is not None and node is not self._drag:
+                self.nodeDropped.emit(self._drag, node, zone)
             return
         paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile() and os.path.isdir(u.toLocalFile())]
         if paths:
-            self.dirsDropped.emit(paths, n if n is not None and n["type"] == "folder" else None)
+            self.dirsDropped.emit(paths, node if node is not None and node["type"] == "folder" and zone == "group" else None)
 
 
 class NetworkDialog(QDialog):
@@ -1455,7 +1884,7 @@ class FavImportDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(QLabel("가져올 위치"))
         self.dest = QComboBox()
-        self.dest.addItems(["빠른 이동", "북마크 바"])
+        self.dest.addItems(["북마크", "빠른 이동"])
         self.dest.currentIndexChanged.connect(self._mark_dups)
         row.addWidget(self.dest)
         row.addStretch(1)
@@ -1475,7 +1904,7 @@ class FavImportDialog(QDialog):
         self._mark_dups()
 
     def _mark_dups(self, *_):
-        have = self.have_quick if self.dest.currentIndex() == 0 else self.have_bm
+        have = self.have_bm if self.dest.currentIndex() == 0 else self.have_quick
         for i, e in enumerate(self.entries):
             it = self.list.item(i)
             dup = os.path.normcase(e["path"]) in have
@@ -1498,10 +1927,22 @@ class Main(QMainWindow):
         for c, w in self.data.get("col_widths", {}).items():      # 열 너비 복원 (json 키는 문자열)
             if str(c).isdigit() and int(c) in FileView.COLS and isinstance(w, int) and 40 <= w <= 3000:
                 FileView.COLS[int(c)] = w
+        order = self.data.get("col_order")                         # 열 순서 / 표시 복원 (형식이 맞을 때만)
+        if isinstance(order, list) and sorted(order) == list(range(FSModel.N_TOTAL)) and order[0] == 0:
+            FileView.ORDER = order
+        hidden = self.data.get("col_hidden")
+        if isinstance(hidden, list) and all(isinstance(c, int) and 0 < c < FSModel.N_TOTAL for c in hidden):
+            FileView.HIDDEN = set(hidden)
 
-        def cols_changed():
+        def cols_changed(apply_others=True):
             self.data["col_widths"] = dict(FileView.COLS)
+            self.data["col_order"] = list(FileView.ORDER)
+            self.data["col_hidden"] = sorted(FileView.HIDDEN)
             self.schedule_save()
+            if apply_others:                                       # 열 순서/표시는 모든 탭에 즉시 반영
+                for p in self.panes:
+                    for v in p.views.values():
+                        v.apply_columns()
         FileView.on_cols_changed = cols_changed
         self.show_hidden = self.data.get("show_hidden", False)
         self.sync_fav = self.data.get("sync_fav", True)
@@ -1512,6 +1953,8 @@ class Main(QMainWindow):
         self.hook = None
         self.quick_items = self.data.setdefault("quick", [])   # 빠른 이동에 내가 추가한 항목
         self.quick_names = self.data.setdefault("quick_names", {})  # 기본 항목 이름 바꾸기 기록
+        self._restoring = True
+        self.migrate_quick_to_bookmarks()
         self._ui.connect(lambda f: f())
         self.clip_paths, self.clip_cut = [], False
         self.runner = JobRunner()
@@ -1533,28 +1976,30 @@ class Main(QMainWindow):
         bar.setSpacing(6)
         bar.addStretch(1)  # 버튼들은 검색창 바로 왼쪽에 오른쪽 정렬
 
-        def btn(text, fn, tip="", checkable=False):
-            b = QPushButton(text)
+        def btn(icon, fn, tip="", checkable=False):
+            b = QToolButton()
+            b.setObjectName("tb")
+            b.setIcon(icon)
+            b.setIconSize(QSize(22, 22))
+            b.setFixedSize(38, 34)
             b.setFocusPolicy(Qt.NoFocus)
             b.setToolTip(tip)
             b.setCheckable(checkable)
             b.clicked.connect(lambda _=False: fn())
             bar.addWidget(b)
             return b
-        self.one_btn = btn("1개 보기", self.toggle_split, "패널 1개 (F3 로 전환)", True)
-        self.split_btn = btn("2개 보기", self.toggle_split, "패널 2개 (F3 로 전환)", True)
+        self.one_btn = btn(view_icon(False), self.toggle_split, "패널 1개 보기 (F3 로 전환)", True)
+        self.split_btn = btn(view_icon(True), self.toggle_split, "패널 2개 보기 (F3 로 전환)", True)
         grp = QButtonGroup(self)
         grp.setExclusive(True)
         grp.addButton(self.one_btn)
         grp.addButton(self.split_btn)
         self.one_btn.setChecked(True)
-        btn("북마크 추가", lambda: self.add_bookmark(self.active_view().path), "현재 폴더를 북마크에 (Ctrl+D)")
-        self.ws_btn = btn("작업공간", lambda: None, "작업공간 저장 / 열기")
-        self.ws_btn.clicked.disconnect()
-        self.ws_btn.clicked.connect(self.workspace_menu)
-        self.opt_btn = btn("설정", lambda: None)
-        self.opt_btn.clicked.disconnect()
-        self.opt_btn.clicked.connect(self.options_menu)
+        bar.addSpacing(6)
+        self.star_btn = btn(star_icon(False), lambda: self.toggle_bookmark(self.active_view().path),
+                            "현재 폴더를 북마크에 추가 / 해제 (Ctrl+D)")
+        self.ws_btn = btn(workspace_icon(), self.workspace_menu, "작업공간 저장 / 열기")
+        self.opt_btn = btn(gear_icon(), self.options_menu, "설정")
         bar.addSpacing(10)
         self.filter = QLineEdit()
         self.filter.setPlaceholderText("이 폴더에서 이름 검색 (Ctrl+F)")
@@ -1598,10 +2043,43 @@ class Main(QMainWindow):
         self.quick = QuickList()
         self.quick.openPath.connect(self.open_path)
         self.quick.menuAt.connect(self.quick_menu)
-        sl.addWidget(self.quick)
-        sl.addStretch(1)
+        sl.addWidget(self.quick, 1)
         side.setMinimumWidth(190)
-        body.addWidget(side)
+
+        # 왼쪽 아래 네모: 북마크 / 최근 / 자주 가는 곳 (트리)
+        side2 = QFrame()
+        side2.setObjectName("panel")
+        tl = QVBoxLayout(side2)
+        tl.setContentsMargins(8, 8, 8, 8)
+        tl.setSpacing(2)
+        thead = QHBoxLayout()
+        thead.addWidget(self._sect("북마크 · 최근"))
+        thead.addStretch(1)
+        tadd = QToolButton()
+        tadd.setObjectName("nav")
+        tadd.setText("+")
+        tadd.setToolTip("북마크 추가 (현재 폴더 / 폴더 선택 / 새 폴더)")
+        tadd.setFocusPolicy(Qt.NoFocus)
+        tadd.clicked.connect(lambda: self.side_menu("section", "bm", QCursor.pos()))
+        thead.addWidget(tadd)
+        tl.addLayout(thead)
+        self.side_tree = SideTree()
+        self.side_tree.openPath.connect(self.open_path)
+        self.side_tree.openFolderAsTabs.connect(self.open_all)
+        self.side_tree.menuAt.connect(self.side_menu)
+        self.side_tree.nodeDropped.connect(self.on_bm_drop)
+        self.side_tree.dirsDropped.connect(self.on_bookmark_drop)
+        self.side_tree.stateChanged.connect(self._side_state_changed)
+        tl.addWidget(self.side_tree, 1)
+        self._side_t = QTimer(self, singleShot=True)
+        self._side_t.timeout.connect(self.rebuild_side)
+
+        side_split = QSplitter(Qt.Vertical)          # 두 네모 사이 경계를 끌어 높이 조절
+        side_split.setChildrenCollapsible(False)
+        side_split.addWidget(side)
+        side_split.addWidget(side2)
+        side_split.setSizes([330, 520])
+        body.addWidget(side_split)
 
         self.panes_split = QSplitter(Qt.Horizontal)
         self.panes = [Pane(self), Pane(self)]
@@ -1648,7 +2126,11 @@ class Main(QMainWindow):
 
         self.setup_shortcuts()
         self.quick.refresh(self.quick_items, self.quick_names)
+        self.rebuild_side()
+        self._restoring = True                  # 세션 복원으로 열린 탭은 '최근/자주 가는 곳' 방문으로 세지 않음
         self.restore_session()
+        self._restoring = False
+        self.update_toolbar_star()
 
     # ---- 구성 보조 ----
     def _sect(self, text):
@@ -1760,6 +2242,7 @@ class Main(QMainWindow):
             self.filter.blockSignals(True)
             self.filter.clear()
             self.filter.blockSignals(False)
+            self.update_toolbar_star()
         self.update_status()
 
     def toggle_split(self):
@@ -2167,6 +2650,9 @@ class Main(QMainWindow):
             else:
                 yield from self._all_paths(n["children"])
 
+    def _pair_nodes(self):
+        return list(x for x in self.bmbar._leaves(self.bm["children"]) if x.get("path2"))
+
     def _remove_node(self, node, kids=None):
         kids = self.bm["children"] if kids is None else kids
         if node in kids:
@@ -2177,11 +2663,134 @@ class Main(QMainWindow):
     def bookmarks_changed(self):
         self.save_bookmarks()
         self.bmbar.render()
+        self.rebuild_side()
         self.refresh_stars()
 
     def refresh_stars(self):
         for p in self.panes:
             p.update_star()
+        self.update_toolbar_star()
+
+    def update_toolbar_star(self):
+        """도구줄 별: 현재 폴더가 북마크돼 있으면 노랗게 채움"""
+        if not hasattr(self, "star_btn"):
+            return
+        v = self.active_view()
+        on = bool(v) and self.is_bookmarked(v.path)
+        self.star_btn.setIcon(star_icon(on))
+        self.star_btn.setToolTip("북마크 해제 (Ctrl+D)" if on else "현재 폴더를 북마크에 추가 (Ctrl+D)")
+
+    # ---- 왼쪽 트리: 북마크 / 최근 / 자주 가는 곳 ----
+    SHOW_RECENT, SHOW_FREQ, KEEP_RECENT = 15, 10, 40
+
+    def migrate_quick_to_bookmarks(self):
+        """예전에는 Windows 즐겨찾기 가져오기가 '빠른 이동'에 들어갔음 → 한 번만 북마크로 옮김.
+        (빠른 이동은 기본 장소 + 드라이브만 남김. 드라이브 루트는 어차피 목록에 있으므로 중복 항목은 버림)"""
+        if self.data.get("quick_migrated"):
+            return
+        self.data["quick_migrated"] = True
+        if self.quick_items:
+            backup_favorites("_이동전")
+            have = {os.path.normcase(os.path.normpath(p)) for p in self._all_paths(self.bm["children"])}
+            for c in self.quick_items:
+                p = c.get("path", "")
+                if not p or (len(p.rstrip("\\/")) == 2 and p[1:2] == ":"):
+                    continue
+                if os.path.normcase(os.path.normpath(p)) not in have:
+                    self.bm["children"].append({"type": "bookmark", "name": c.get("name") or tab_title(p), "path": p})
+                    have.add(os.path.normcase(os.path.normpath(p)))
+            self.quick_items.clear()
+            self.save_bookmarks()
+        save_json(EXPLORER_FILE, self.data)
+
+    def record_visit(self, path):
+        if self._restoring or not path:
+            return
+        p = os.path.normpath(path)
+        k = os.path.normcase(p)
+        rec = self.data.setdefault("recent", [])
+        rec[:] = [x for x in rec if os.path.normcase(x) != k]
+        rec.insert(0, p)
+        del rec[self.KEEP_RECENT:]
+        fq = self.data.setdefault("freq", {})
+        e = fq.get(k) or {"p": p, "n": 0}
+        e["n"] += 1
+        e["p"] = p
+        fq[k] = e
+        if len(fq) > 300:                                   # 방문 횟수가 적은 것부터 정리
+            for key, _ in sorted(fq.items(), key=lambda kv: kv[1]["n"])[:len(fq) - 300]:
+                del fq[key]
+        self._side_t.start(400)
+        self.schedule_save()
+
+    def rebuild_side(self):
+        fq = sorted((e for e in self.data.get("freq", {}).values() if e["n"] >= 2), key=lambda e: -e["n"])
+        self.side_tree.build(self.bm, self.data.get("recent", [])[:self.SHOW_RECENT],
+                             [e["p"] for e in fq[:self.SHOW_FREQ]], self.data.setdefault("side_open", {}))
+
+    def _side_state_changed(self):
+        self.save_bookmarks()
+        self.schedule_save()
+
+    def side_menu(self, kind, payload, pos):
+        m = QMenu(self)
+        other = self.other_pane()
+        if kind == "bm":
+            n = payload
+            if n["type"] == "bookmark":
+                m.addAction("열기", lambda: self.open_path(n["path"], False))
+                m.addAction("새 탭에서 열기", lambda: self.open_path(n["path"], True))
+                m.addAction("반대편 패널에서 열기", lambda: self.open_in_other(n["path"]))
+            else:
+                cnt = sum(1 for _ in self.bmbar._leaves(n["children"]))
+                m.addAction(f"모두 열기 ({cnt}개, 현재 패널의 탭으로)", lambda: self.open_all(n))
+                m.addAction("반대편 패널에 모두 열기", lambda: self.open_all(n, other=True))
+                m.addSeparator()
+                m.addAction("현재 폴더를 이 안에 추가", lambda: self.add_bookmark(self.active_view().path, n))
+                m.addAction("이 안에 새 폴더…", lambda: self.new_bm_folder(n))
+                m.addAction("폴더 풀기 (안의 북마크를 밖으로)", lambda: self.unwrap_folder(n))
+            m.addSeparator()
+            m.addAction("이름 변경…", lambda: self.rename_node(n))
+            m.addAction("위로 이동", lambda: self.move_node(n, -1))
+            m.addAction("아래로 이동", lambda: self.move_node(n, 1))
+            m.addAction("삭제", lambda: self.delete_node(n))
+        elif kind == "path":
+            path, src = payload
+            m.addAction("열기", lambda: self.open_path(path, False))
+            m.addAction("새 탭에서 열기", lambda: self.open_path(path, True))
+            m.addAction("반대편 패널에서 열기", lambda: self.open_in_other(path))
+            m.addSeparator()
+            m.addAction("북마크에 추가", lambda: self.add_bookmark(path))
+            m.addAction("목록에서 제거", lambda: self.forget_visit(path, src))
+        else:                                                 # 섹션 머리글 / 빈 곳
+            if payload == "bm":
+                m.addAction("현재 폴더 북마크에 추가", lambda: self.add_bookmark(self.active_view().path))
+                m.addAction("폴더 선택하여 북마크 추가…", self.add_bookmark_dialog)
+                m.addAction("새 북마크 폴더…", self.new_bm_folder)
+                m.addSeparator()
+                m.addAction("Windows 탐색기 즐겨찾기 불러오기…", self.import_windows_favorites)
+            else:
+                m.addAction("최근 목록 지우기" if payload == "recent" else "자주 가는 곳 목록 지우기",
+                            lambda: self.clear_visits(payload))
+        m.exec(pos)
+
+    def forget_visit(self, path, src):
+        k = os.path.normcase(path)
+        if src == "recent":
+            rec = self.data.get("recent", [])
+            rec[:] = [x for x in rec if os.path.normcase(x) != k]
+        else:
+            self.data.get("freq", {}).pop(k, None)
+        self.schedule_save()
+        self.rebuild_side()
+
+    def clear_visits(self, which):
+        if which == "recent":
+            self.data["recent"] = []
+        else:
+            self.data["freq"] = {}
+        self.schedule_save()
+        self.rebuild_side()
 
     def is_bookmarked(self, path):
         return bool(path) and os.path.normcase(os.path.normpath(path)) in \
@@ -2228,54 +2837,33 @@ class Main(QMainWindow):
         lst = self._parent_list(n)
         if lst is None:
             return
+        is_pair = bool(n.get("path2"))
         i = lst.index(n)
         j = i + d
+        while 0 <= j < len(lst) and bool(lst[j].get("path2")) != is_pair:     # 세트 ↔ 일반 북마크는 서로 건너뜀
+            j += d
         if 0 <= j < len(lst):
             lst[i], lst[j] = lst[j], lst[i]
             self.bookmarks_changed()
 
     def bookmark_menu(self, n, pos):
+        """위쪽 바(세트 북마크 전용)의 우클릭 / + 메뉴. 일반 북마크는 왼쪽 트리(side_menu)에서 관리"""
         m = QMenu(self)
         if n is not None:
-            if n["type"] == "bookmark" and n.get("path2"):
-                m.addAction("열기 (양쪽 패널에 각각)", lambda: self.open_pair(n))
-                m.addAction("두 개의 북마크로 나누기", lambda: self.split_pair(n))
-            elif n["type"] == "bookmark":
-                m.addAction("열기", lambda: self.open_path(n["path"], False))
-                m.addAction("새 탭에서 열기", lambda: self.open_path(n["path"], True))
-                m.addAction("반대편 패널에서 열기", lambda: self.open_in_other(n["path"]))
-            else:
-                cnt = sum(1 for _ in self.bmbar._leaves(n["children"]))
-                m.addAction(f"모두 열기 ({cnt}개, 현재 패널의 탭으로)", lambda: self.open_all(n))
-                m.addAction("반대편 패널에 모두 열기", lambda: self.open_all(n, other=True))
-                m.addAction("안의 북마크 목록 보기", lambda: self.bmbar._folder_menu(n).exec(QCursor.pos()))
-                m.addAction("폴더 풀기 (안의 북마크를 밖으로)", lambda: self.unwrap_folder(n))
+            m.addAction("열기 (양쪽 패널에 각각)", lambda: self.open_pair(n))
             m.addAction("이름 변경…", lambda: self.rename_node(n))
             m.addAction("왼쪽으로 이동", lambda: self.move_node(n, -1))
             m.addAction("오른쪽으로 이동", lambda: self.move_node(n, 1))
+            m.addAction("두 개의 북마크로 나누기 (왼쪽 트리로)", lambda: self.split_pair(n))
             m.addAction("삭제", lambda: self.delete_node(n))
             m.addSeparator()
-        m.addAction("현재 폴더 북마크에 추가", lambda: self.add_bookmark(self.active_view().path))
-        m.addAction("폴더 선택하여 북마크 추가…", self.add_bookmark_dialog)
-        m.addAction("양쪽 패널 세트를 북마크로 추가  (Ctrl+Shift+D)", self.add_pair_bookmark)
-        m.addAction("새 북마크 폴더…", self.new_bm_folder)
+        m.addAction("양쪽 패널 세트를 추가  (Ctrl+Shift+D)", self.add_pair_bookmark)
         m.addSeparator()
-        f = m.addAction("폴더 클릭 = 안의 북마크 모두 탭으로 열기")
-        f.setCheckable(True)
-        f.setChecked(self.bmbar.folder_click_opens)
-        f.triggered.connect(self.toggle_bm_folder_click)
         a = m.addAction("이름 숨기고 아이콘만 보기")
         a.setCheckable(True)
         a.setChecked(self.bmbar.icons_only)
         a.triggered.connect(self.toggle_bm_icons)
         m.exec(pos)
-
-    def toggle_bm_folder_click(self):
-        self.bmbar.folder_click_opens = not self.bmbar.folder_click_opens
-        self.data["bm_folder_tabs"] = self.bmbar.folder_click_opens
-        self.schedule_save()
-        self.bmbar.render()
-        self.say("북마크 폴더 클릭: " + ("안의 북마크를 모두 탭으로 열기" if self.bmbar.folder_click_opens else "목록 펼치기"))
 
     # ---- 세트 북마크 (폴더 2개를 북마크 1개로) ----
     def add_pair_bookmark(self):
@@ -2341,6 +2929,8 @@ class Main(QMainWindow):
         """북마크 바에서 끌어다 놓기: 가장자리=순서 변경, 가운데=폴더로 묶기, 빈 곳=맨 끝"""
         if node is target:
             return
+        if node.get("path2") and (target is None or not target.get("path2")):
+            target, zone = None, "end"              # 위쪽 바의 세트는 다른 세트 앞/뒤로만 정렬 (그 밖은 맨 끝)
         if target is not None and node["type"] == "folder" and (target is node or self._contains(node, target)):
             return  # 폴더를 자기 안으로 넣을 수 없음
         QTimer.singleShot(0, lambda: self._bm_drop(node, target, zone))   # 드래그가 끝난 뒤 처리
@@ -2527,10 +3117,15 @@ class Main(QMainWindow):
                 if os.path.normcase(p) not in still:
                     threading.Thread(target=F.unpin_home, args=(p,), daemon=True).start()
 
-    def new_bm_folder(self):
-        name, ok = QInputDialog.getText(self, "새 북마크 폴더", "폴더 이름:")
+    def new_bm_folder(self, parent=None):
+        """북마크 폴더 만들기. parent(북마크 폴더 노드)를 주면 그 안에 (폴더 안의 폴더)"""
+        parent = parent if isinstance(parent, dict) and parent.get("type") == "folder" else None
+        name, ok = QInputDialog.getText(self, "새 북마크 폴더" + (f" ({parent['name']} 안)" if parent else ""), "폴더 이름:")
         if ok and name.strip():
-            self.bm["children"].append({"type": "folder", "name": name.strip(), "open": True, "children": []})
+            (parent["children"] if parent else self.bm["children"]).append(
+                {"type": "folder", "name": name.strip(), "open": True, "children": []})
+            if parent:
+                parent["open"] = True
             self.bookmarks_changed()
 
     # ---- 설정/작업공간 메뉴 ----
@@ -2669,7 +3264,7 @@ class Main(QMainWindow):
             return
         self.backup_now("_가져오기전")          # 가져오기 전에 현재 내용을 항상 백업
         added = 0
-        if dest == 0:                                # 빠른 이동
+        if dest == 1:                                # 빠른 이동
             if replace:
                 self.quick_items.clear()
             have = {os.path.normcase(c["path"]) for c in self.quick_items} | self._default_quick_paths()
@@ -2679,9 +3274,9 @@ class Main(QMainWindow):
                     have.add(os.path.normcase(e["path"]))
                     added += 1
             self.quick_changed()
-        else:                                        # 북마크 바
+        else:                                        # 북마크 (왼쪽 트리)
             if replace:
-                self.bm["children"].clear()
+                self.bm["children"][:] = [n for n in self._pair_nodes()]      # 세트 북마크는 남기고 일반 북마크만 교체
             have = {os.path.normcase(x) for x in self._all_paths(self.bm["children"])}
             for e in chosen:
                 if os.path.normcase(e["path"]) not in have:
@@ -2689,7 +3284,7 @@ class Main(QMainWindow):
                     have.add(os.path.normcase(e["path"]))
                     added += 1
             self.bookmarks_changed()
-        self.say(f"Windows 즐겨찾기 {added}개를 {'북마크 바' if dest else '빠른 이동'}로 가져왔습니다 (이전 내용은 backup 폴더에 백업됨)")
+        self.say(f"Windows 즐겨찾기 {added}개를 {'빠른 이동' if dest else '북마크'}로 가져왔습니다 (이전 내용은 backup 폴더에 백업됨)")
 
     def toggle_sync(self):
         self.sync_fav = not self.sync_fav
@@ -2880,15 +3475,27 @@ def set_startup(on):
 
 def import_favorites_cli():
     """설치 시 '기존 Windows 탐색기 즐겨찾기 불러오기'를 체크한 경우: 창 없이 빠른 이동으로 추가(기존 내용 유지)"""
+    """(0.1.2부터) 가져온 즐겨찾기는 '빠른 이동'이 아니라 북마크(왼쪽 트리)로 들어감"""
     data = load_json(EXPLORER_FILE, {})
     backup_favorites("_설치전")
-    quick = data.setdefault("quick", [])
-    have = {os.path.normcase(c["path"]) for c in quick} | {os.path.normcase(os.path.join(HOME, s))
-                                                            for s in ("Desktop", "Downloads", "Documents", "Pictures")}
+    bm = load_json(BOOKMARKS_FILE, {"children": []})
+    bm.setdefault("children", [])
+
+    def paths(kids):
+        for n in kids:
+            if n.get("type") == "folder":
+                yield from paths(n.get("children", []))
+            elif n.get("path"):
+                yield n["path"]
+    have = {os.path.normcase(os.path.normpath(p)) for p in paths(bm["children"])} | \
+           {os.path.normcase(os.path.join(HOME, s)) for s in ("Desktop", "Downloads", "Documents", "Pictures")}
     for e in F.windows_pinned_folders():
-        if os.path.normcase(e["path"]) not in have:
-            quick.append({"name": e["name"], "path": e["path"], "net": e["path"].startswith("\\\\")})
-            have.add(os.path.normcase(e["path"]))
+        k = os.path.normcase(os.path.normpath(e["path"]))
+        if k not in have:
+            bm["children"].append({"type": "bookmark", "name": e["name"], "path": e["path"]})
+            have.add(k)
+    data["quick_migrated"] = True
+    save_json(BOOKMARKS_FILE, bm)
     save_json(EXPLORER_FILE, data)
 
 
@@ -2951,6 +3558,8 @@ def main():
         w.open_external(os.path.abspath(a))
     w.apply_win_e()
     if "--selftest" in sys.argv:
+        from jycommon import DATA_DIR
+        (DATA_DIR / "selftest.txt").write_text(f"mediainfo_available={MI.AVAILABLE}\n", encoding="utf-8")
         QTimer.singleShot(1500, app.quit)
     sys.exit(app.exec())
 

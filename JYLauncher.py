@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from jycommon import (DATA_DIR, FONT_FAMILY, FROZEN, LAUNCHER_FILE, SETTINGS_FILE, VAULT_FILE,
+from jycommon import (DATA_DIR, FONT_FAMILY, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, SETTINGS_FILE, VAULT_FILE,
                       add_item_to_launcher, app_icon, create_app_shortcuts, file_mtime, pick_category, load_font, load_json, save_json)
 from updater import Updater
 from version import __version__
@@ -1887,7 +1887,7 @@ class Main(QWidget):
             super().keyPressEvent(e)
 
 
-SERVER_NAME = "JYLauncher-single-instance"
+SERVER_NAME = "JYLauncher-single-instance" + INSTANCE_SUFFIX
 HOTKEY_ID = 0x4A59
 HOTKEY_TEXT = "Ctrl+Alt+L"
 

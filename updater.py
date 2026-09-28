@@ -22,13 +22,13 @@ from PySide6.QtGui import QAction
 from PySide6.QtNetwork import QLocalSocket
 from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
 
-from jycommon import DATA_DIR, FROZEN, PORTABLE, load_json, save_json
+from jycommon import DATA_DIR, FROZEN, INSTANCE_SUFFIX, PORTABLE, load_json, save_json
 from version import GITHUB_OWNER, GITHUB_REPO, RELEASES_API, __version__
 
 STATE_FILE = DATA_DIR / "update.json"
 CHECK_INTERVAL = 20 * 3600            # 자동 확인 간격(초)
 ALLOWED_PREFIX = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/"
-SERVER_NAMES = {"launcher": "JYLauncher-single-instance", "explorer": "JYExplorer-single-instance"}
+SERVER_NAMES = {"launcher": "JYLauncher-single-instance" + INSTANCE_SUFFIX, "explorer": "JYExplorer-single-instance" + INSTANCE_SUFFIX}
 CREATE_NO_WINDOW, DETACHED_PROCESS, NEW_GROUP = 0x08000000, 0x00000008, 0x00000200
 
 
