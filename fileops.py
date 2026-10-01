@@ -95,6 +95,8 @@ class Job:
         self.files_done = 0
         self.errors = []
         self.current = ""
+        self.total_files = 0
+        self.active = {}            # 지금 복사 중인 파일들 {대상 경로: [이름, 복사한 바이트, 파일 크기]} (여러 개 동시에 보여주기용)
         self._lock = threading.Lock()
         self._ask_lock = threading.Lock()
         self.policy = None  # "모두 적용" 결과
@@ -123,17 +125,34 @@ class Job:
                 self.policy = ans
             return ans
 
+    def snapshot(self):
+        """지금 복사 중인 파일 목록 [(이름, 복사한 바이트, 크기), …] (화면 표시용 복사본)"""
+        with self._lock:
+            return [(a[0], a[1], a[2]) for a in self.active.values()]
+
     def _copy_file(self, src, dst):
         """청크 복사(취소/진행률). 이미 있는 dst 는 호출 전에 처리됨."""
-        with open(src, "rb") as fi, open(dst, "wb") as fo:
-            while True:
-                if self.cancel.is_set():
-                    raise Cancelled()
-                buf = fi.read(CHUNK)
-                if not buf:
-                    break
-                fo.write(buf)
-                self._add(len(buf))
+        try:
+            size = os.path.getsize(src)
+        except OSError:
+            size = 0
+        entry = [os.path.basename(src), 0, size]
+        with self._lock:
+            self.active[dst] = entry
+        try:
+            with open(src, "rb") as fi, open(dst, "wb") as fo:
+                while True:
+                    if self.cancel.is_set():
+                        raise Cancelled()
+                    buf = fi.read(CHUNK)
+                    if not buf:
+                        break
+                    fo.write(buf)
+                    entry[1] += len(buf)
+                    self._add(len(buf))
+        finally:
+            with self._lock:
+                self.active.pop(dst, None)
         shutil.copystat(src, dst, follow_symlinks=True)
 
     def _transfer_file(self, src, dst, same_vol):
@@ -236,7 +255,10 @@ class Job:
         def ticker():
             while not stop.wait(0.1):
                 if progress:
-                    progress(self.done_bytes, self.total_bytes, self.current)
+                    try:
+                        progress(self.done_bytes, self.total_bytes, self.current)
+                    except Exception:
+                        pass
         threading.Thread(target=ticker, daemon=True).start()
 
         def rm(p):
@@ -278,12 +300,16 @@ class Job:
             except OSError:
                 sizes[s] = 0
         self.total_bytes = sum(sizes.values()) or 1
+        self.total_files = len(files)
         stop = threading.Event()
 
         def ticker():
             while not stop.wait(0.1):
                 if progress:
-                    progress(self.done_bytes, self.total_bytes, self.current)
+                    try:
+                        progress(self.done_bytes, self.total_bytes, self.current)
+                    except Exception:               # 화면 쪽 오류 때문에 진행 표시가 멈추지 않게
+                        pass
 
         t = threading.Thread(target=ticker, daemon=True)
         t.start()

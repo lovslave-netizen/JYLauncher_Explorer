@@ -80,7 +80,7 @@ def _owner():
 
 
 class ShellMenu:
-    def __init__(self, paths, folder, extended=False):
+    def __init__(self, paths, folder, extended=False, allow_root=False):
         """paths: 같은 폴더 안의 선택 항목들 / 없으면 folder 배경 메뉴. extended: Shift+우클릭(추가 명령)"""
         self.hmenu = None
         self.ctx = None
@@ -91,10 +91,11 @@ class ShellMenu:
             if paths:
                 paths = [os.path.normpath(p) for p in paths]
                 parent = os.path.dirname(paths[0])
-                if any(len(p) <= 3 and p[1:2] == ":" for p in paths) or not parent or parent == paths[0] \
-                        or parent.startswith("\\\\") and parent.count("\\") < 4:
+                is_root = any(len(p) <= 3 and p[1:2] == ":" for p in paths) or not parent or parent == paths[0] \
+                    or parent.startswith("\\\\") and parent.count("\\") < 4
+                if is_root and not allow_root:
                     raise ShellMenuUnsupported("드라이브/네트워크 루트")
-                if len({os.path.dirname(p) for p in paths}) == 1:
+                if not is_root and len({os.path.dirname(p) for p in paths}) == 1:
                     ppidl = shell.SHParseDisplayName(parent, 0)[0]
                     pf = desktop.BindToObject(ppidl, None, shell.IID_IShellFolder)
                     children = [pf.ParseDisplayName(0, None, os.path.basename(p))[1] for p in paths]

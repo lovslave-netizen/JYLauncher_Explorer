@@ -111,6 +111,7 @@ QDialog QLineEdit, QInputDialog QLineEdit { background: rgba(255,255,255,0.10); 
     border-radius: 8px; padding: 6px 10px; selection-background-color: #5b6cff; }
 QDialog QComboBox { background: rgba(255,255,255,0.10); color: #ffffff; border: 1px solid #4a5090; }
 QDialog QPushButton { min-width: 72px; }
+QPushButton[kb="true"], QComboBox[kb="true"] { border: 2px solid #aab4ff; background: rgba(124,140,255,0.28); }
 QToolTip { background: #1e2140; color: #e8eaf6; border: 1px solid #4a5090; padding: 4px 8px; }
 QDialog#folderpop { background: #191c33; border: 1px solid #4a5090; border-radius: 18px; }
 QLabel#poptitle { font-size: 20px; font-weight: 700; color: #ffffff; }
@@ -690,6 +691,10 @@ class LauncherPage(QScrollArea):
             r = max(0, min(len(self.rows) - 1, r + dr))
             c = min(self._want_col, len(self.rows[r]) - 1)
         self.select(self.rows[r][c])
+
+    def at_top(self):
+        """선택이 맨 윗줄에 있거나 아직 선택이 없음 → ↑ 를 누르면 위쪽 버튼줄로 올라갈 수 있음"""
+        return not self.rows or self.current is None or self.current in self.rows[0]
 
     def handle_key(self, e):
         k = e.key()
@@ -2032,7 +2037,52 @@ class Main(QWidget):
         save_json(SETTINGS_FILE, self.settings)
         self.launcher.rebuild()
 
+    # ---- 위쪽 버튼줄(＋ 앱 추가, 아이콘 크기 등)을 키보드로 ----
+    def header_widgets(self):
+        return [w for w in self.action_sets[self.index] if w.isEnabled()]
+
+    def _page_at_top(self):
+        p = self.page()
+        if hasattr(p, "at_top"):
+            return p.at_top()
+        t = getattr(p, "tree", None)
+        if t is not None:
+            return t.currentItem() is None or not t.indexAbove(t.currentIndex()).isValid()
+        return False
+
+    def set_header(self, i):
+        """위쪽 버튼줄에서 i 번째 버튼에 키보드 선택 표시 (-1 = 해제)"""
+        ws = self.header_widgets()
+        self._hdr = i if 0 <= i < len(ws) else -1
+        for w in [x for s in self.action_sets for x in s]:
+            on = self._hdr >= 0 and w is ws[self._hdr]
+            if w.property("kb") != on:
+                w.setProperty("kb", on)
+                _repolish(w)
+
+    def header_key(self, e):
+        """위쪽 버튼줄 선택 중의 키 처리. 처리했으면 True"""
+        ws = self.header_widgets()
+        k = e.key()
+        if k == Qt.Key_Left:
+            self.set_header((self._hdr - 1) % len(ws))
+        elif k == Qt.Key_Right:
+            self.set_header((self._hdr + 1) % len(ws))
+        elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            w = ws[self._hdr]
+            if isinstance(w, QComboBox):
+                w.showPopup()
+            else:
+                w.click()
+        elif k in (Qt.Key_Down, Qt.Key_Escape):
+            self.set_header(-1)
+        else:
+            return False
+        return True
+
     def goto(self, i):
+        if self._hdr >= 0:
+            self.set_header(-1)
         self.index = i
         self.group.button(i).setChecked(True)
         self.stack.setCurrentIndex(i)
@@ -2174,8 +2224,18 @@ class Main(QWidget):
                 return True
         return super().eventFilter(obj, e)
 
+    _hdr = -1
+
     def keyPressEvent(self, e):
         k, mods = e.key(), e.modifiers()
+        if self._hdr >= 0:                                    # 위쪽 버튼줄 선택 중
+            if self.header_key(e):
+                return
+            self.set_header(-1)
+        elif k == Qt.Key_Up and not mods and self.header_widgets() and self._page_at_top():
+            self.focus_list()
+            self.set_header(0)                                # 맨 위에서 ↑ → 위쪽 버튼줄로 (← → 이동, Enter 실행, ↓ 로 복귀)
+            return
         if k == Qt.Key_Escape:
             if self.search.text():
                 self.search.clear()

@@ -55,6 +55,10 @@ jobs:
         shell: pwsh
         run: ./ci_test.ps1 test_newmenu.py
 
+      - name: 테스트 - 복사 진행/새로고침/런처 키
+        shell: pwsh
+        run: ./ci_test.ps1 test_ops.py
+
       - name: 테스트 - 화면 스모크
         shell: pwsh
         run: ./ci_test.ps1 test_smoke.py

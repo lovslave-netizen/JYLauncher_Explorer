@@ -150,6 +150,33 @@ def drive_label(path):
     return path
 
 
+def drive_display(path):
+    """빠른 이동용 드라이브 이름: '로컬 디스크 (C:)', 'Google Drive (G:)', '공유이름 (\\\\서버) (Z:)'.
+    네트워크 드라이브는 끊겨 있어도 멈추지 않게 이름 조회 없이 연결 정보만 씀"""
+    letter = path[:2]
+    try:
+        dt = ctypes.windll.kernel32.GetDriveTypeW(path)
+        if dt == 4:
+            buf = ctypes.create_unicode_buffer(512)
+            n = ctypes.c_ulong(512)
+            if ctypes.windll.mpr.WNetGetConnectionW(letter, buf, ctypes.byref(n)) == 0 and buf.value.startswith("\\\\"):
+                server, _, share = buf.value[2:].partition("\\")
+                return f"{share or server} (\\\\{server}) ({letter})"
+            return f"네트워크 드라이브 ({letter})"
+        k32 = ctypes.windll.kernel32
+        old = k32.SetErrorMode(1)                      # SEM_FAILCRITICALERRORS: 빈 CD/USB 슬롯에서 오류 창이 뜨지 않게
+        try:
+            lab = ctypes.create_unicode_buffer(261)
+            ok = k32.GetVolumeInformationW(path, lab, 261, None, None, None, None, 0)
+        finally:
+            k32.SetErrorMode(old)
+        label = lab.value if ok else ""
+        default = {2: "이동식 디스크", 3: "로컬 디스크", 5: "DVD RW 드라이브", 6: "RAM 디스크"}.get(dt, "드라이브")
+        return f"{label or default} ({letter})"
+    except Exception:
+        return path
+
+
 def credential_targets():
     """Windows 자격 증명 관리자에 저장된 서버 목록 (cmdkey /list). 저장된 계정으로 자동 로그인됨"""
     try:
@@ -418,7 +445,43 @@ class FileView(QTreeView):
         if FileView.on_cols_changed:
             FileView.on_cols_changed(apply_others)
 
+    def refresh(self):
+        """폴더를 다시 읽음. QFileSystemModel 은 네트워크 드라이브/대량 작업/USB 에서 변경을 놓치는 일이 있어서
+        모델을 새로 만들어 갈아 끼움 (선택 항목·스크롤·정렬·열 설정은 유지)"""
+        if getattr(self, "_refreshing", False):
+            return
+        self._refreshing = True
+        sel = self.selected_paths()
+        cur = self.model_.filePath(self.currentIndex()) if self.currentIndex().isValid() else ""
+        sb = self.verticalScrollBar().value()
+        old = self.model_
+        m = FSModel(self)
+        m.setReadOnly(False)
+        self.model_ = m
+        self.set_hidden(getattr(self, "_show_hidden", False))
+        self.setModel(m)
+        self.apply_columns()
+        self.sortByColumn(*self._sort)
+        self.setRootIndex(m.setRootPath(self.path) if self.path else m.index(""))
+        old.deleteLater()
+
+        def restore():
+            try:
+                for p in sel:
+                    i = m.index(p)
+                    if i.isValid():
+                        self.selectionModel().select(i, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+                if cur and m.index(cur).isValid():
+                    self.setCurrentIndex(m.index(cur))
+                self.verticalScrollBar().setValue(sb)
+                self.selectionSummary.emit()
+            except RuntimeError:
+                pass
+            self._refreshing = False
+        QTimer.singleShot(500, restore)
+
     def set_hidden(self, on):
+        self._show_hidden = on
         f = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.System
         self.model_.setFilter(f | QDir.Hidden if on else f)
 
@@ -490,8 +553,12 @@ class FileView(QTreeView):
         if idx.isValid():
             self.edit(idx.siblingAtColumn(0))
 
-    def select_path(self, path, rename=False):
+    def select_path(self, path, rename=False, _retry=True):
         idx = self.model_.index(path)
+        if not idx.isValid() and _retry:                # 방금 만든 파일이 목록에 아직 없으면 새로 읽고 한 번 더 시도
+            self.refresh()
+            QTimer.singleShot(900, lambda: self.select_path(path, rename, False))
+            return False
         if idx.isValid():
             self.setCurrentIndex(idx)
             self.selectionModel().select(idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
@@ -944,9 +1011,14 @@ class Pane(QFrame):
         self.star.triggered.connect(lambda: self.main.toggle_bookmark(self.view().path if self.view() else ""))
         self.btn_new = self._nav_btn("+", "새 탭 (Ctrl+T)")
         self.btn_new.clicked.connect(lambda: self.add_tab(self.view().path if self.view() else HOME))
+        self.btn_refresh = self._nav_btn("", "새로고침 (Ctrl+R)")
+        self.btn_refresh.setIcon(refresh_icon())
+        self.btn_refresh.setIconSize(QSize(16, 16))
+        self.btn_refresh.clicked.connect(lambda: self.view() and self.view().search_page is None and self.view().refresh())
         for w in (self.btn_back, self.btn_fwd, self.btn_up):
             nav.addWidget(w)
         nav.addWidget(self.pathbar, 1)
+        nav.addWidget(self.btn_refresh)
         nav.addWidget(self.btn_new)
         lay.addLayout(nav)
 
@@ -1349,7 +1421,7 @@ class QuickList(QListWidget):
             add(c["name"], c["path"], icon, i)
         for d in QDir.drives():
             p = d.absolutePath().replace("/", "\\")
-            add(drive_label(p), p, _provider.icon(QFileInfo(p)), tip=p)
+            add(drive_display(p), p, _provider.icon(QFileInfo(p)), tip=p)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
 
@@ -1699,6 +1771,19 @@ def gear_icon():
     pt.drawEllipse(QPointF(0, 0), 13.5, 13.5)
     pt.setCompositionMode(QPainter.CompositionMode_Clear)
     pt.drawEllipse(QPointF(0, 0), 6, 6)
+    pt.end()
+    return QIcon(pm)
+
+
+def refresh_icon():
+    """새로고침: 화살표 달린 원 (글꼴에 없는 기호를 쓰지 않고 직접 그림)"""
+    pm, pt = _canvas()
+    pt.setPen(QPen(_ICON_COLOR, 3.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    pt.setBrush(Qt.NoBrush)
+    pt.drawArc(QRectF(8, 8, 28, 28), 40 * 16, 280 * 16)
+    pt.setBrush(_ICON_COLOR)
+    pt.setPen(Qt.NoPen)
+    pt.drawPolygon(QPolygonF([QPointF(34, 8), QPointF(35, 21), QPointF(23, 17)]))
     pt.end()
     return QIcon(pm)
 
@@ -2133,7 +2218,9 @@ class ConflictDialog(QDialog):
 
 # ───────────────────────── 백그라운드 작업 ─────────────────────────
 class JobRunner(QObject):
-    progress = Signal(int, int, str)
+    progress = Signal(object, object, str)      # 주의: int 로 선언하면 2GB 를 넘는 값이 넘쳐서(오류/음수) 큰 파일 진행이 멈춘 것처럼 보임
+    detail = Signal(object, object, object)     # (지금 복사 중인 파일들, 처리한 파일 수, 전체 파일 수)
+    touched = Signal(object)                    # 작업이 끝난 뒤 다시 읽어야 할 폴더 목록
     started = Signal(str)
     finished = Signal(str, list, bool)
     conflict = Signal(str, str, object)
@@ -2177,8 +2264,13 @@ class JobRunner(QObject):
             self.current = job
             label = {"copy": "복사", "move": "이동", "delete": "삭제"}.get(job.op, "작업")
             self.started.emit(f"{label} 중…")
-            ok = job.run(lambda d, t, n: self.progress.emit(d, t, n))
+            def cb(d, t, n, job=job):
+                self.progress.emit(d, t, n)
+                self.detail.emit(job.snapshot(), job.files_done, job.total_files)
+            ok = job.run(cb)
             self.current = None
+            dirs = [job.dest_dir] + [os.path.dirname(x.rstrip("\\/")) for x in job.sources]
+            self.touched.emit([d for d in dirs if d])
             summary = f"{label} {'완료' if ok else '취소됨'} · 파일 {job.files_done:,}개"
             self.finished.emit(summary, job.errors, ok)
             self.queueChanged.emit(len(self.queue))
@@ -2239,6 +2331,8 @@ class Main(QMainWindow):
         self.runner.progress.connect(self.on_progress)
         self.runner.started.connect(self.on_job_started)
         self.runner.finished.connect(self.on_job_finished)
+        self.runner.detail.connect(self.on_job_detail)
+        self.runner.touched.connect(lambda dirs: QTimer.singleShot(400, lambda: self.refresh_dirs(dirs)))
         self.runner.conflict.connect(self.on_conflict)
         self.runner.queueChanged.connect(self.on_queue)
 
@@ -2325,6 +2419,14 @@ class Main(QMainWindow):
         qadd.setFocusPolicy(Qt.NoFocus)
         qadd.clicked.connect(lambda: self.quick_menu(None, QCursor.pos()))
         qhead.addWidget(qadd)
+        qref = QToolButton()
+        qref.setObjectName("nav")
+        qref.setIcon(refresh_icon())
+        qref.setIconSize(QSize(16, 16))
+        qref.setToolTip("빠른 이동 새로고침 (USB 를 꽂거나 뺀 뒤)")
+        qref.setFocusPolicy(Qt.NoFocus)
+        qref.clicked.connect(lambda: (self.quick.refresh(self.quick_items, self.quick_names), self.say("빠른 이동을 새로고침했습니다")))
+        qhead.addWidget(qref)
         sl.addLayout(qhead)
         self.quick = QuickList()
         self.quick.openPath.connect(self.open_path)
@@ -2400,6 +2502,11 @@ class Main(QMainWindow):
         foot.addWidget(self.job_label)
         foot.addWidget(self.job_bar)
         foot.addWidget(self.cancel_btn)
+        self.job_detail = QLabel()                     # 복사 중인 파일별 진행률 (WinSCP 처럼 여러 줄)
+        self.job_detail.setObjectName("status")
+        self.job_detail.setTextFormat(Qt.RichText)
+        self.job_detail.hide()
+        outer.addWidget(self.job_detail)
         outer.addLayout(foot)
 
         self.active = self.panes[0]
@@ -2412,6 +2519,10 @@ class Main(QMainWindow):
 
         self.setup_shortcuts()
         self.quick.refresh(self.quick_items, self.quick_names)
+        self._drive_mask = ctypes.windll.kernel32.GetLogicalDrives()
+        self._drive_t = QTimer(self)                      # 드라이브 문자 목록(비트마스크)만 비교: 3초마다 시스템 호출 1번이라 부담 없음
+        self._drive_t.timeout.connect(self._check_drives)
+        self._drive_t.start(3000)
         self.rebuild_side()
         self._restoring = True                  # 세션 복원으로 열린 탭은 '최근/자주 가는 곳' 방문으로 세지 않음
         self.restore_session()
@@ -2446,6 +2557,7 @@ class Main(QMainWindow):
         sc("Ctrl+Shift+D", self.add_pair_bookmark)
         sc("Ctrl+H", self.toggle_hidden)
         sc("F4", lambda: self.switch_pane())
+        sc("Ctrl+R", lambda: self.active_view().search_page is None and self.active_view().refresh())
         sc("F2", self.rename_current)
         sc("Esc", self.on_escape)
 
@@ -2922,6 +3034,7 @@ class Main(QMainWindow):
         else:
             F.delete_paths(paths, False, int(self.winId()))
             self.say(f"{len(paths)}개 휴지통으로 이동")
+            QTimer.singleShot(400, lambda: self.refresh_dirs([os.path.dirname(x.rstrip("\\/")) for x in paths]))
         v.setFocus()
 
     def new_folder(self, view):
@@ -2948,12 +3061,34 @@ class Main(QMainWindow):
         amount = f"{done:,} / {total:,}개" if by_count else f"{fmt_size(done)} / {fmt_size(total)}"
         self.job_label.setText(f"{name[:40]}   {amount}" if name else self.job_label.text())
 
+    def on_job_detail(self, active, done, total):
+        rows = sorted(active, key=lambda a: -a[2])[:6]
+        if not rows:
+            self.job_detail.hide()
+            return
+        head = f"<span style='color:#9aa0c4'>파일 {done:,} / {total:,}개 처리 · 지금 {len(active)}개 동시 진행</span>"
+        body = "".join(
+            f"<tr><td style='padding-right:14px'>{name[:46]}</td>"
+            f"<td align='right' style='padding-right:12px'><b>{int(d * 100 / s) if s else 0}%</b></td>"
+            f"<td style='color:#9aa0c4'>{fmt_size(d)} / {fmt_size(s)}</td></tr>"
+            for name, d, s in rows)
+        self.job_detail.setText(f"{head}<table cellspacing='1'>{body}</table>")
+        self.job_detail.show()
+
+    def refresh_dirs(self, dirs):
+        """작업이 끝난 폴더를 보고 있는 모든 탭을 다시 읽음 (복사/이동/삭제 직후 목록이 바로 갱신되도록)"""
+        keys = {os.path.normcase(os.path.normpath(d)) for d in dirs if d}
+        for p in self.panes:
+            for v in p.views.values():
+                if v.path and v.search_page is None and os.path.normcase(os.path.normpath(v.path)) in keys:
+                    v.refresh()
+
     def on_queue(self, n):
         self.cancel_btn.setText(f"취소 ({n})" if n > 1 else "취소")
 
     def on_job_finished(self, summary, errors, ok):
         if not self.runner.queue:
-            for w in (self.job_label, self.job_bar, self.cancel_btn):
+            for w in (self.job_label, self.job_bar, self.cancel_btn, self.job_detail):
                 w.hide()
         self.say(summary + (f" · 오류 {len(errors)}" if errors else ""))
         if errors:
@@ -3519,7 +3654,56 @@ class Main(QMainWindow):
         if d:
             self.add_quick(os.path.normpath(d))
 
+    def _check_drives(self):
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        if mask != self._drive_mask:                      # USB 를 꽂거나 뺌 → 빠른 이동 목록 갱신
+            self._drive_mask = mask
+            self.quick.refresh(self.quick_items, self.quick_names)
+
     def quick_menu(self, entry, pos):
+        """빠른 이동 항목 우클릭: 일반 탐색기 왼쪽 창처럼 Windows 메뉴(드라이브는 포맷/꺼내기/속성 …) + 내 항목"""
+        if entry is not None and entry.get("path") and os.path.isdir(entry["path"]):
+            try:
+                self._quick_shell_menu(entry, pos)
+                return
+            except Exception:
+                pass
+        self._quick_simple_menu(entry, pos)
+
+    def _quick_shell_menu(self, entry, pos):
+        import shellmenu as SM
+        path = entry["path"]
+        m = SM.ShellMenu([path], path, extended=bool(QGuiApplication.keyboardModifiers() & Qt.ShiftModifier), allow_root=True)
+        try:
+            # 이 목록은 '바로가기'일 뿐이라 실제 폴더를 지우거나 이름을 바꾸는 항목은 뺌 (이름 변경은 아래 '표시 이름 변경')
+            m.remove_verbs({"open", "rename", "delete", "cut", "paste", "jylauncheradd"})
+            actions, items = {}, []
+
+            def add(text, fn):
+                cid = SM.CUSTOM_BASE + len(actions)
+                actions[cid] = fn
+                items.append((cid, text))
+            add("열기", lambda: self.open_path(path, False))
+            add("새 탭에서 열기", lambda: self.open_path(path, True))
+            if self.other_pane():
+                add("반대편 패널에서 열기", lambda: self.open_in_other(path))
+            add("표시 이름 변경…", lambda: self.rename_quick(entry))
+            if entry.get("builtin") and os.path.normcase(path) in self.quick_names:
+                add("원래 이름으로", lambda: self.reset_quick_name(entry))
+            if not entry.get("builtin"):
+                add("빠른 이동에서 제거", lambda: self.remove_quick(entry))
+            m.add_custom(items)
+            scr = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+            dpr = scr.devicePixelRatio()
+            cmd = m.track(pos.x() * dpr, pos.y() * dpr)
+            if cmd >= SM.CUSTOM_BASE:
+                actions[cmd]()
+            elif cmd:
+                m.invoke(cmd, int(self.winId()))
+        finally:
+            m.close()
+
+    def _quick_simple_menu(self, entry, pos):
         m = QMenu(self)
         if entry is not None:
             m.addAction("이름 변경…", lambda: self.rename_quick(entry))
