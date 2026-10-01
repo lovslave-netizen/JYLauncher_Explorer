@@ -124,9 +124,48 @@ def main():
             raise AssertionError("root must be rejected by default")
         except SM.ShellMenuUnsupported:
             pass
+    # 6) 폴더 통째 이동이 권한으로 막혀도(이름 바꾸기 거부) 복사 후 삭제로 이동됨
+    base = tempfile.mkdtemp()
+    sdir = os.path.join(base, "src", "folder")
+    os.makedirs(os.path.join(sdir, "sub"))
+    for rel in ("a.txt", os.path.join("sub", "b.txt")):
+        open(os.path.join(sdir, rel), "w").write("data")
+    ddir = os.path.join(base, "dst")
+    os.makedirs(ddir)
+    real_rename = os.rename
+
+    def denied(a, b, *x, **k):
+        if os.path.isdir(a):
+            raise PermissionError(5, "액세스가 거부되었습니다")
+        return real_rename(a, b, *x, **k)
+    os.rename = denied
+    try:
+        j = F.Job("move", [sdir], ddir)
+        assert j.run() and not j.errors, j.errors
+    finally:
+        os.rename = real_rename
+    assert open(os.path.join(ddir, "folder", "sub", "b.txt")).read() == "data" and not os.path.exists(sdir)
+
+    # 7) F2 이름 바꾸기: 확장자 앞까지만 선택
+    from PySide6.QtGui import QStandardItem, QStandardItemModel
+    from PySide6.QtWidgets import QLineEdit
+    import search_ui as SUI
+
+    def stem_selection(name, is_dir):
+        mdl = QStandardItemModel()
+        mdl.appendRow(QStandardItem(name))
+        ed = QLineEdit()
+        SUI.StemDelegate(lambda ix: is_dir).setEditorData(ed, mdl.index(0, 0))
+        pump(100)
+        return ed.selectedText()
+    assert stem_selection("보고서.최종.txt", False) == "보고서.최종"
+    assert stem_selection("폴더.v2", True) == "폴더.v2"
+    assert stem_selection(".gitignore", False) == ".gitignore"          # 점으로 시작하는 파일은 전체 선택
+    assert stem_selection("noext", False) == "noext"
+    assert isinstance(w.active_view().itemDelegate(), SUI.StemDelegate)
     print("explorer ops OK", flush=True)
 
-    # 6) 런처: 맨 위에서 ↑ → 위쪽 버튼줄, ← → 이동, ↓ 복귀
+    # 8) 런처: 맨 위에서 ↑ → 위쪽 버튼줄, ← → 이동, ↓ 복귀
     import JYLauncher as L
     lw = L.Main()
     lw.show()

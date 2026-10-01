@@ -6,10 +6,10 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QFileInfo, QMimeData, QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QFileInfo, QMimeData, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDrag, QKeySequence
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFileIconProvider, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
+                               QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 import filesearch as FS
 from jycommon import DATA_DIR, load_json, save_json
@@ -45,6 +45,31 @@ def ext_icon(path, is_dir):
     return ic
 
 
+class StemDelegate(QStyledItemDelegate):
+    """F2 이름 바꾸기 편집기: 파일은 확장자(.txt 등)를 빼고 이름 부분만 선택 (폴더/확장자 없는 파일은 전체 선택).
+    is_dir(index) 는 폴더인지 알려주는 함수"""
+
+    def __init__(self, is_dir, parent=None):
+        super().__init__(parent)
+        self.is_dir = is_dir
+
+    def setEditorData(self, editor, index):
+        super().setEditorData(editor, index)
+        if not isinstance(editor, QLineEdit):
+            return
+        text = editor.text()
+        dot = text.rfind(".")
+        end = len(text) if (self.is_dir(index) or dot <= 0) else dot
+
+        def select():
+            try:
+                editor.setSelection(0, end)
+            except RuntimeError:
+                pass
+        select()
+        QTimer.singleShot(0, select)                     # 편집기가 포커스를 받으면서 전체 선택으로 바뀌는 것을 되돌림
+
+
 class ResultsTree(QTreeWidget):
     """검색 결과 목록 (탐색기 파일 목록처럼): 이름 / 위치 / 수정한 날짜 / 확장자 / 크기.
     더블클릭·Enter = 열기, 우클릭 = Windows 우클릭 메뉴(탐색기에서 연결), F2 = 이름 바꾸기, Ctrl+C/X 복사·잘라내기,
@@ -68,6 +93,7 @@ class ResultsTree(QTreeWidget):
         self.setUniformRowHeights(True)
         self.setAlternatingRowColors(True)
         self.setEditTriggers(QTreeWidget.NoEditTriggers)          # 편집은 F2 / 우클릭 '이름 바꾸기' 로만
+        self.setItemDelegateForColumn(0, StemDelegate(lambda ix: bool((ix.data(Qt.UserRole) or ("", False))[1]), self))
         self.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.setSortingEnabled(False)
         self.setDragEnabled(True)

@@ -12,7 +12,7 @@
 ;   - 조용한 설치(/SILENT)에서는 /RELAUNCH=launcher,explorer 로 지정한 프로그램을 설치 후 다시 실행
 
 #ifndef AppVersion
-  #define AppVersion "0.1.12"
+  #define AppVersion "0.1.13"
 #endif
 #define AppName "JY Tools"
 #define AppIdGuid "7A3C1E52-4B8D-4F6A-9C21-5D0E8B7F3A10"

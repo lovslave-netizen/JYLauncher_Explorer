@@ -322,6 +322,7 @@ class FileView(QTreeView):
         self.setModel(self.model_)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.EditKeyPressed)
+        self.setItemDelegate(SUI.StemDelegate(lambda ix: ix.model().isDir(ix), self))      # F2: 확장자는 두고 이름만 선택
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)

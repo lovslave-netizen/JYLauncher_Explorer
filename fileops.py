@@ -195,6 +195,40 @@ class Job:
         except OSError as e:
             self._err(src, e)
 
+    def _fallback_move(self, src, dst):
+        """폴더 통째 이동(이름 바꾸기)이 '액세스 거부' 등으로 막혔을 때: 안의 파일을 하나씩 복사하고 원본을 지워 이동.
+        (폴더 자체를 다른 프로그램/폴더 감시가 붙잡고 있어도 안의 파일은 대부분 옮길 수 있음) 시도했으면 True"""
+        if not os.path.isdir(src):
+            return False
+        try:
+            todo = []
+            for root, _dn, fnames in os.walk(src):
+                rel = os.path.relpath(root, src)
+                droot = dst if rel == "." else os.path.join(dst, rel)
+                os.makedirs(droot, exist_ok=True)
+                for f in fnames:
+                    todo.append((os.path.join(root, f), os.path.join(droot, f)))
+            extra = 0
+            for s, _d in todo:
+                try:
+                    extra += os.path.getsize(s)
+                except OSError:
+                    pass
+            self.total_bytes += extra
+            self.total_files += len(todo)
+            for s, d in todo:
+                self._transfer_file(s, d, False)               # 복사 후 원본 삭제 (충돌/취소/오류는 기존 처리 그대로)
+            for root, _dn, _fn in os.walk(src, topdown=False):  # 비워진 원본 폴더 정리
+                try:
+                    os.rmdir(root)
+                except OSError:
+                    pass
+            return True
+        except Cancelled:
+            raise
+        except OSError:
+            return False
+
     # ---- 계획 수립 ----
     def _plan(self):
         files, dirs, moves_whole = [], [], []   # files: (src, dst), dirs: dst dirs, moves_whole: (src,dst)
@@ -319,7 +353,8 @@ class Job:
                 try:
                     os.rename(src, dst)
                 except OSError as e:
-                    self._err(src, e)
+                    if not self._fallback_move(src, dst):         # 이름 바꾸기가 막히면(권한/다른 프로그램이 폴더를 붙잡음) 복사 후 삭제로
+                        self._err(src, e)
             for d in dirs:
                 try:
                     os.makedirs(d, exist_ok=True)
