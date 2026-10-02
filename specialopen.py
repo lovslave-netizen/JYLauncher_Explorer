@@ -191,17 +191,22 @@ def open_with_dialog(exe, path, log=None, wait_main=40.0, wait_dialog=12.0, args
     if not _clip_set(path):
         return False, "클립보드를 사용할 수 없습니다"
     try:
-        wins = windows_of(exe)
-        if not wins:
-            say("프로그램을 시작하는 중…")
-            try:
-                subprocess.Popen([exe, *args], cwd=os.path.dirname(exe))
-            except OSError as e:
-                return False, f"프로그램을 실행하지 못했습니다: {e}"
-            end = time.monotonic() + wait_main
-            while time.monotonic() < end and not wins:
-                time.sleep(0.25)
-                wins = windows_of(exe)
+        existing = {h for h, _t in windows_of(exe)}
+        say("프로그램을 시작하는 중…")                                 # 이미 떠 있어도 새로 실행: 이 프로그램은 실행할 때마다 새 창이 뜸 (열려 있는 다른 문서를 건드리지 않음)
+        try:
+            subprocess.Popen([exe, *args], cwd=os.path.dirname(exe))
+        except OSError as e:
+            return False, f"프로그램을 실행하지 못했습니다: {e}"
+        wins = []
+        end = time.monotonic() + wait_main
+        while time.monotonic() < end and not wins:
+            time.sleep(0.25)
+            wins = [w for w in windows_of(exe) if w[0] not in existing and w[1]]      # 새로 생긴, 제목이 있는 창 (시작 화면 제외)
+        if wins:
+            time.sleep(1.0)                                           # 시작 화면이 사라지고 주 창이 자리 잡을 때까지
+            wins = [w for w in windows_of(exe) if w[0] not in existing and w[1]] or wins
+        elif existing:                                                # 새 창이 안 뜨는 프로그램(이미 떠 있는 창으로 전달하는 방식)이면 기존 창을 사용
+            wins = windows_of(exe)
         if not wins:
             return False, "프로그램 창이 나타나지 않았습니다 (경로는 클립보드에 있습니다: Ctrl+O 후 Ctrl+V)"
         main = max(wins, key=lambda w: len(w[1]))[0]

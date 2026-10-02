@@ -99,13 +99,41 @@ def main():
     # 4) 빠른 이동: 드라이브 이름 + 새로고침
     name = J.drive_display("C:\\")
     assert name.endswith("(C:)") and len(name) > 4, name
-    texts = [w.quick.item(i).text() for i in range(w.quick.count())]
+    texts = [w.quick.item(i).data(Qt.UserRole + 2) for i in range(w.quick.count())]
     assert any(x.endswith("(C:)") and len(x) > 4 for x in texts), texts
     mask = w._drive_mask
     w._drive_mask = 0
     w._check_drives()                                  # 드라이브 구성이 바뀐 것으로 보고 목록 갱신
     assert w._drive_mask == mask
     assert w.quick.count() == len(texts)
+
+    # 4-2) 화면 구성: 빠른 이동 = 아이콘 격자(글자 없음, 툴팁), 세트 북마크 = 설정 왼쪽 버튼, 배지/세트 바 숨김, 기본 접힘
+    assert all(w.quick.item(i).text() == "" and w.quick.item(i).toolTip() for i in range(w.quick.count()))
+    assert w.quick.height() <= w.quick.GRID.height() * 6 + 8, w.quick.height()          # 열 개 남짓 → 몇 줄이면 끝
+    assert w.sets_btn.x() > w.search_btn.x() and w.sets_btn.x() < w.opt_btn.x()
+    assert not w.bmbar.isVisible()
+    w.split_btn.click()
+    pump(200)
+    assert all(not p.badge.isVisible() for p in w.panes)
+    w.one_btn.click()
+    assert not w.side_tree.topLevelItem(1).isExpanded() and not w.side_tree.topLevelItem(2).isExpanded()
+    assert w.side_tree.topLevelItem(0).isExpanded()
+    icon = J.drive_icon("C:\\")
+    assert not icon.isNull() and isinstance(J.special_drive_letters(), set)
+
+    # 4-3) 경로줄: 길면 맨 앞 드라이브는 남기고 가운데를 … 로 접어 마지막 폴더가 보임
+    pb = J.PathBar()
+    pb.resize(330, 34)
+    pb.show()
+    pb.set_path("D:\\aa\\bbbbbbbbbbbb\\cccccccccccc\\dddddddddddd\\eeeeeeeeeeee\\last")
+    pump(200)
+    vis = [b.text() for b, _s in pb._items if b.isVisible()]
+    assert vis[0] == "D:" and vis[-1] == "last" and pb.ell.isVisible() and len(vis) < 7, vis
+    assert [n for n, _p in pb._segs[1:pb._start]] and all(n not in vis for n, _p in pb._segs[1:pb._start])
+    pb.resize(2000, 34)
+    pump(200)
+    assert all(b.isVisible() for b, _s in pb._items) and not pb.ell.isVisible()
+    pb.close()
 
     # 5) 드라이브 루트 Windows 메뉴 (포맷/속성 등): 셸을 쓸 수 있는 환경에서만
     try:

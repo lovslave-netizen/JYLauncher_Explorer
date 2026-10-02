@@ -19,10 +19,10 @@ from pathlib import Path
 from PySide6.QtCore import (QByteArray, QDir, QFileInfo, QItemSelectionModel, QMimeData, QPointF, QModelIndex, QObject, QRectF, QSize, Qt, QTimer, QUrl,
                             Signal)
 from PySide6.QtGui import (QColor, QCursor, QDrag, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPen,
-                           QPixmap, QPolygonF, QShortcut)
+                           QPixmap, QPolygonF, QShortcut, QFont)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFileIconProvider, QFileSystemModel, QFrame,
+    QAbstractItemView, QApplication, QButtonGroup, QListView, QCheckBox, QComboBox, QDialog, QFileDialog, QFileIconProvider, QFileSystemModel, QFrame,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSplitter, QStackedWidget, QTabBar,
     QSystemTrayIcon, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -727,14 +727,20 @@ class PathBar(QLineEdit):
         self.ell.setFocusPolicy(Qt.NoFocus)
         self.ell.clicked.connect(self._ell_menu)
         self.ell.hide()
+        self.ell_sep = QLabel("›", self.area)
+        self.ell_sep.setObjectName("crumbsep")
+        self.ell_sep.setAlignment(Qt.AlignCenter)
+        self.ell_sep.hide()
 
     def set_path(self, path, label=None):
         self._shown = label or path or "내 PC"
         if self.hasFocus():
             self.setText(self._shown)               # 입력 모드일 때만 글자를 채움 (버튼 모드에서는 비워 둬서 겹쳐 보이지 않음)
         for btn, sep in self._items:
+            btn.hide()                                  # 삭제는 나중에 일어나므로 먼저 숨겨서 새 경로와 겹쳐 보이지 않게
             btn.deleteLater()
             if sep:
+                sep.hide()
                 sep.deleteLater()
         self._items = []
         self._segs = [(label, "")] if label else split_path(path)
@@ -765,21 +771,23 @@ class PathBar(QLineEdit):
                 sep.ensurePolished()
         self.ell.ensurePolished()
         widths = [btn.sizeHint().width() + (8 if sep else 0) for btn, sep in self._items]
-        ell_w = self.ell.sizeHint().width()
+        ell_w = self.ell.sizeHint().width() + 8
         n = len(widths)
-        start = n - 1                       # 다 안 들어가면 앞쪽을 접고 뒤에서부터 보여줌 (마지막 폴더는 항상 표시)
-        for s in range(n):
-            if sum(widths[s:]) + (ell_w if s else 0) <= w:
-                start = s
-                break
+        if sum(widths) <= w or n <= 2:
+            start = 1                                    # 다 들어감
+        else:                                            # 맨 앞(드라이브) + … + 마지막 쪽 폴더들 (마지막 폴더는 항상 표시)
+            start = n - 1
+            for s in range(2, n):
+                if widths[0] + ell_w + sum(widths[s:]) <= w:
+                    start = s
+                    break
         self._start = start
+        fold = start > 1
+        self.ell.setVisible(fold)
+        self.ell_sep.setVisible(fold)
         x = 0
-        self.ell.setVisible(start > 0)
-        if start > 0:
-            self.ell.setGeometry(0, 0, ell_w, h)
-            x = ell_w
         for i, (btn, sep) in enumerate(self._items):
-            visible = i >= start
+            visible = i == 0 or i >= start
             btn.setVisible(visible)
             if sep:
                 sep.setVisible(visible)
@@ -791,10 +799,15 @@ class PathBar(QLineEdit):
             if sep:
                 sep.setGeometry(x, 0, 8, h)
                 x += 8
+            if i == 0 and fold:
+                self.ell.setGeometry(x, 0, ell_w - 8, h)
+                x += ell_w - 8
+                self.ell_sep.setGeometry(x, 0, 8, h)
+                x += 8
 
     def _ell_menu(self):
         m = QMenu(self)
-        for name, p in self._segs[:self._start]:
+        for name, p in self._segs[1:self._start]:
             m.addAction(name, lambda p=p: self.crumbClicked.emit(p))
         m.exec(self.ell.mapToGlobal(self.ell.rect().bottomLeft()))
 
@@ -1322,7 +1335,7 @@ class Pane(QFrame):
         """on: 활성 여부, split: 2개 보기 중인지 (표시 스타일용)"""
         if split is not None:
             self.setProperty("split", split)
-            self.badge.setVisible(split)
+            self.badge.hide()                                  # '왼쪽/오른쪽 패널' 줄은 없앰 (선택된 패널은 굵은 테두리로 구분)
         self.setProperty("active", bool(on))
         if self.property("split"):
             self.badge.setText(f"{self.side} 패널")            # 선택된 쪽은 테두리/배지 색으로 이미 구분됨
@@ -1364,16 +1377,72 @@ class Pane(QFrame):
 
 
 # ───────────────────────── 사이드바: 빠른 이동 + 북마크 ─────────────────────────
+_special_letters = {"t": 0.0, "v": set()}
+
+
+def special_drive_letters():
+    """Windows 에 전용 아이콘이 등록된 드라이브 문자 (RaiDrive 등이 HKLM/HKCU ...\\Explorer\\DriveIcons\\<문자> 에 등록). 1분 캐시"""
+    now = time.monotonic()
+    if now - _special_letters["t"] < 60:
+        return _special_letters["v"]
+    import winreg
+    letters = set()
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons") as k:
+                for i in range(winreg.QueryInfoKey(k)[0]):
+                    letters.add(winreg.EnumKey(k, i).upper()[:1])
+        except OSError:
+            continue
+    _special_letters.update(t=now, v=letters)
+    return letters
+
+
+def drive_icon(path):
+    """드라이브 아이콘. 전용 아이콘(RaiDrive 등)이면 그대로, 기본 그림이면 드라이브 그림 위에 문자(C, D …) 배지를 겹쳐 구분"""
+    pm = _provider.icon(QFileInfo(path)).pixmap(QSize(28, 28))
+    if pm.isNull():
+        pm = QPixmap(28, 28)
+        pm.fill(Qt.transparent)
+    letter = path[:1].upper()
+    if letter in special_drive_letters() or not letter.isalpha():
+        return QIcon(pm)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    r = QRectF(pm.width() - 15, pm.height() - 15, 15, 15)
+    p.setBrush(QColor("#10121d"))
+    p.setPen(QPen(QColor("#8b98ff"), 1))
+    p.drawRoundedRect(r, 4, 4)
+    f = QFont(p.font())
+    f.setPixelSize(10)
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor("#ffffff"))
+    p.drawText(r, Qt.AlignCenter, letter)
+    p.end()
+    return QIcon(pm)
+
+
 class QuickList(QListWidget):
-    """빠른 이동: 기본 폴더 + 내가 추가한 폴더/네트워크 + 드라이브"""
+    """빠른 이동: 작은 아이콘 격자 (내 PC, 바탕화면, 다운로드, 문서, 내가 추가한 폴더/네트워크, 드라이브). 이름은 마우스를 올리면 툴팁으로"""
     openPath = Signal(str, bool)   # 경로, 새 탭 여부
-    menuAt = Signal(object, object)  # 사용자 추가 항목(dict, 없으면 None), 전역 좌표
+    menuAt = Signal(object, object)  # 항목(dict, 없으면 None), 전역 좌표
+    fitted = Signal(int)           # 격자가 차지하는 높이가 바뀜 (위쪽 네모 크기를 맞추는 용)
+    GRID = QSize(40, 40)
 
     def __init__(self):
         super().__init__()
         self.setFocusPolicy(Qt.NoFocus)
-        self.setIconSize(QSize(20, 20))
-        self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setViewMode(QListView.IconMode)
+        self.setMovement(QListView.Static)
+        self.setResizeMode(QListView.Adjust)
+        self.setWrapping(True)
+        self.setIconSize(QSize(28, 28))
+        self.setGridSize(self.GRID)
+        self.setSpacing(0)
+        self.setUniformItemSizes(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.custom = []
         self.names = {}     # 기본 항목(바탕화면/드라이브 등)의 이름 바꾸기 기록 {경로: 이름}
         self.itemClicked.connect(lambda it: self.openPath.emit(it.data(Qt.UserRole), False))
@@ -1388,12 +1457,11 @@ class QuickList(QListWidget):
             if isinstance(idx, int) and 0 <= idx < len(self.custom):
                 entry = self.custom[idx]            # 내가 추가한 항목
             else:                                   # 기본 항목(내 PC, 바탕화면, 드라이브 …)도 이름 변경 가능
-                entry = {"name": it.text(), "path": it.data(Qt.UserRole), "builtin": True}
+                entry = {"name": it.data(Qt.UserRole + 2), "path": it.data(Qt.UserRole), "builtin": True}
         self.menuAt.emit(entry, self.viewport().mapToGlobal(pos))
 
     def wheelEvent(self, e):
-        if not shift_wheel(self, e):
-            super().wheelEvent(e)
+        e.ignore()                                  # 스크롤 없이 항상 전부 보임 → 바깥 스크롤에 맡김
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MiddleButton:
@@ -1403,6 +1471,19 @@ class QuickList(QListWidget):
             return
         super().mouseReleaseEvent(e)
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self):
+        """폭에 맞춰 줄 수를 계산해 높이를 딱 맞춤"""
+        cols = max(1, (self.viewport().width() or self.width()) // self.GRID.width())
+        rows = max(1, -(-self.count() // cols))
+        h = rows * self.GRID.height() + 8
+        if h != self.height():
+            self.setFixedHeight(h)
+            self.fitted.emit(h)
+
     def refresh(self, custom=None, names=None):
         if custom is not None:
             self.custom = custom
@@ -1411,15 +1492,17 @@ class QuickList(QListWidget):
         self.clear()
 
         def add(name, path, icon, idx=-1, tip=""):
-            it = QListWidgetItem(self.names.get(os.path.normcase(path), name))
+            shown = self.names.get(os.path.normcase(path), name)
+            it = QListWidgetItem("")
             it.setData(Qt.UserRole, path)
             it.setData(Qt.UserRole + 1, idx)
+            it.setData(Qt.UserRole + 2, shown)
             it.setIcon(icon)
-            it.setToolTip(tip or path)
+            it.setToolTip(shown + (("\n" + (tip or path)) if (tip or path) and (tip or path) != shown else ""))
+            it.setSizeHint(self.GRID)
             self.addItem(it)
         add("내 PC", "", _provider.icon(QFileIconProvider.Computer))
-        for name, sub in (("바탕화면", "Desktop"), ("다운로드", "Downloads"), ("문서", "Documents"),
-                          ("사진", "Pictures")):
+        for name, sub in (("바탕화면", "Desktop"), ("다운로드", "Downloads"), ("문서", "Documents")):
             p = os.path.join(HOME, sub)
             if os.path.isdir(p):
                 add(name, p, _provider.icon(QFileInfo(p)))
@@ -1428,8 +1511,8 @@ class QuickList(QListWidget):
             add(c["name"], c["path"], icon, i)
         for d in QDir.drives():
             p = d.absolutePath().replace("/", "\\")
-            add(drive_display(p), p, _provider.icon(QFileInfo(p)), tip=p)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            add(drive_display(p), p, drive_icon(p), tip=p)
+        self._fit()
 
 
 def pair_icon(mark=None):
@@ -1969,7 +2052,7 @@ class SideTree(QTreeWidget):
                 ph.setFlags(Qt.NoItemFlags)
                 ph.setIcon(0, tree_icon("none", None))
                 sec.addChild(ph)
-            sec.setExpanded(open_state.get(key, True))
+            sec.setExpanded(open_state.get(key, key == "bm"))        # 최근/자주 가는 곳은 기본 접힘 (북마크가 가장 크게)
             sec.setIcon(0, tree_icon("open" if sec.isExpanded() else "closed", key))
         self.blockSignals(False)
 
@@ -2349,8 +2432,8 @@ class Main(QMainWindow):
         root.setObjectName("root")
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(12, 10, 12, 8)
-        outer.setSpacing(8)
+        outer.setContentsMargins(8, 6, 8, 4)
+        outer.setSpacing(5)
 
         # 상단 도구줄
         bar = QHBoxLayout()
@@ -2381,6 +2464,9 @@ class Main(QMainWindow):
                             "현재 폴더를 북마크에 추가 / 해제 (Ctrl+D)")
         self.search_btn = btn(search_icon(), lambda: self.open_search("all"),
                               "검색 탭 열기\nCtrl+F = 전체 색인 검색, Ctrl+Shift+F = 이 폴더와 하위 폴더 검색")
+        self.sets_btn = btn(pair_icon(), self.sets_menu, "세트 북마크 — 폴더 2개를 양쪽 패널에 한 번에 열기 (저장: Ctrl+Shift+D)")
+        self.sets_btn.setIconSize(QSize(38, 18))
+        self.sets_btn.setFixedSize(54, 34)
         self.opt_btn = btn(gear_icon(), self.options_menu, "설정")
         bar.addSpacing(10)
         self.search_box = QLineEdit()
@@ -2410,6 +2496,7 @@ class Main(QMainWindow):
         self.bmbar.nodeDropped.connect(self.on_bm_drop)
         self.bmbar.openPair.connect(self.open_pair)
         outer.addWidget(self.bmbar)
+        self.bmbar.hide()                                  # 세트 북마크 바는 없앰 (설정 왼쪽의 세트 버튼 메뉴로 대체)
 
         # 본문: 사이드바 + 패널들
         body = QSplitter(Qt.Horizontal)
@@ -2441,7 +2528,8 @@ class Main(QMainWindow):
         self.quick.openPath.connect(self.open_path)
         self.quick.menuAt.connect(self.quick_menu)
         sl.addWidget(self.quick, 1)
-        side.setMinimumWidth(190)
+        side.setMinimumWidth(165)
+        self.quick.fitted.connect(lambda h, side=side: side.setFixedHeight(h + 52))      # 머리글 + 여백
 
         # 왼쪽 아래 네모: 북마크 / 최근 / 자주 가는 곳 (트리)
         side2 = QFrame()
@@ -2475,7 +2563,9 @@ class Main(QMainWindow):
         side_split.setChildrenCollapsible(False)
         side_split.addWidget(side)
         side_split.addWidget(side2)
-        side_split.setSizes([330, 520])
+        side_split.setStretchFactor(0, 0)
+        side_split.setStretchFactor(1, 1)
+        self.side_split = side_split
         body.addWidget(side_split)
 
         self.panes_split = QSplitter(Qt.Horizontal)
@@ -2487,7 +2577,7 @@ class Main(QMainWindow):
             p.statusChanged.connect(self.update_status)
         body.addWidget(self.panes_split)
         body.setStretchFactor(1, 1)
-        body.setSizes([230, 1100])
+        body.setSizes([215, 1100])
         outer.addWidget(body, 1)
 
         # 하단 상태줄
@@ -3894,6 +3984,28 @@ class Main(QMainWindow):
     def open_index_dialog(self):
         """설정 → 검색 색인: Everything 이 색인한 볼륨/폴더를 보고 폴더 색인을 추가/제거 (없으면 설치 안내)"""
         SUI.IndexDialog(self).exec()
+
+    def sets_menu(self):
+        """세트 북마크(폴더 2개) 목록: 클릭 = 양쪽 패널에 열기, '세트 관리' 에서 이름 변경/표시/순서/삭제"""
+        m = QMenu(self)
+        sets = self._pair_nodes()
+        if not sets:
+            m.addAction("(저장된 세트가 없습니다)").setEnabled(False)
+        for n in sets:
+            m.addAction(pair_icon(n.get("mark")), n["name"], lambda n=n: self.open_pair(n))
+        m.addSeparator()
+        m.addAction("현재 양쪽 폴더를 세트로 저장  (Ctrl+Shift+D)", self.add_pair_bookmark)
+        if sets:
+            mg = m.addMenu("세트 관리")
+            for n in sets:
+                sub = mg.addMenu(pair_icon(n.get("mark")), n["name"])
+                sub.addAction("이름 변경…", lambda n=n: self.rename_node(n))
+                self.add_mark_menu(sub, n)
+                sub.addAction("앞으로 이동", lambda n=n: self.move_node(n, -1))
+                sub.addAction("뒤로 이동", lambda n=n: self.move_node(n, 1))
+                sub.addAction("두 개의 북마크로 나누기 (왼쪽 트리로)", lambda n=n: self.split_pair(n))
+                sub.addAction("삭제", lambda n=n: self.delete_node(n))
+        m.exec(self.sets_btn.mapToGlobal(self.sets_btn.rect().bottomLeft()))
 
     def toggle_resident(self):
         self.data["resident"] = not self.data.get("resident", True)
