@@ -2403,6 +2403,110 @@ class JobRunner(QObject):
             self.queueChanged.emit(len(self.queue))
 
 
+# ───────────────────────── 단축키 보기 (F1) ─────────────────────────
+# (표시할 키 글자, 실제 등록된 QShortcut 키들(대조용), 설명)
+SHORTCUT_HELP = (
+    ("영역 이동", (
+        ("F3", ("F3",), "사이드바로 이동 / 다시 누르면 빠른 이동 ↔ 북마크 번갈아"),
+        ("F4", ("F4",), "패널로 / 패널 안에서는 왼쪽 ↔ 오른쪽 패널"),
+        ("Ctrl+Tab", ("Ctrl+Tab", "Ctrl+Shift+Tab"), "사이드바 ↔ 패널 번갈아 (마지막 위치 기억)"),
+        ("Alt+1 ~ 9", tuple(f"Alt+{i}" for i in range(1, 10)), "드라이브를 보이는 순서대로 (C=1, D=2 …)"),
+        ("Alt+0 / Alt+- / Alt+` / Alt+=", ("Alt+0", "Alt+-", "Alt+`", "Alt+="), "내 PC / 바탕화면 / 다운로드 / 문서"),
+        ("Ctrl+1 ~ 9", tuple(f"Ctrl+{i}" for i in range(1, 10)), "북마크에 지정한 단축키 (우클릭 → 단축키 지정)"),
+        ("사이드바에서 방향키 · Enter · Esc", (), "이동 · 열기 · 패널로 복귀 (트리: → 펼침, ← 접기)"),
+    )),
+    ("탐색", (
+        ("Alt+← / Alt+→", (), "뒤로 / 앞으로"),
+        ("Alt+↑ · Backspace", (), "위 폴더로"),
+        ("Ctrl+L", ("Ctrl+L",), "주소 입력 (경로를 붙여넣어 이동)"),
+        ("Ctrl+R", ("Ctrl+R",), "새로고침"),
+        ("Ctrl+H", ("Ctrl+H",), "숨김 파일 표시 켜기/끄기"),
+        ("F7", ("F7",), "1개 보기 ↔ 2개 보기"),
+        ("Shift + 마우스 휠", (), "가로 스크롤 (열이 넓을 때)"),
+    )),
+    ("탭", (
+        ("Ctrl+T / Ctrl+W", ("Ctrl+T", "Ctrl+W"), "새 탭 / 탭 닫기"),
+        ("Ctrl+PgUp / Ctrl+PgDn", ("Ctrl+PgUp", "Ctrl+PgDown"), "이전 / 다음 탭"),
+        ("Ctrl+Alt+← / →", ("Ctrl+Alt+Left", "Ctrl+Alt+Right"), "현재 탭을 반대편 패널로 보내기"),
+    )),
+    ("검색", (
+        ("Ctrl+F", ("Ctrl+F",), "검색 탭 열기 — 전체 색인(Everything) 검색"),
+        ("Ctrl+Shift+F", ("Ctrl+Shift+F",), "검색 탭 열기 — 지금 폴더와 하위 폴더"),
+        ("Esc", ("Esc",), "검색창/입력에서 목록으로 돌아가기"),
+    )),
+    ("북마크", (
+        ("Ctrl+D", ("Ctrl+D",), "현재 폴더를 북마크에 추가 / 해제"),
+        ("Ctrl+Shift+D", ("Ctrl+Shift+D",), "양쪽 패널의 폴더 2개를 세트 북마크로 저장"),
+    )),
+    ("파일", (
+        ("F2", ("F2",), "이름 바꾸기 (확장자는 두고 이름만 선택)"),
+        ("Ctrl+C / Ctrl+X / Ctrl+V", (), "복사 / 잘라내기 / 붙여넣기 (복사하면 경로 텍스트도 같이)"),
+        ("F5 / F6", ("F5", "F6"), "선택한 파일을 반대편 패널로 복사 / 이동"),
+        ("Del / Shift+Del", (), "휴지통으로 삭제 / 바로 완전 삭제"),
+        ("Ctrl+Shift+N", (), "새 폴더"),
+        ("Enter / 더블클릭", (), "열기 (.dxb 는 Duxbury 로)"),
+    )),
+    ("기타", (
+        ("F1", ("F1",), "이 단축키 목록"),
+        ("Win+E", (), "JY Explorer 열기 / 활성화 (탐색기가 켜져 있을 때)"),
+    )),
+)
+
+
+class ShortcutDialog(QDialog):
+    """단축키 목록: 위쪽 검색창으로 키나 설명을 걸러 볼 수 있음"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("단축키")
+        self.resize(760, 680)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 14)
+        self.q = QLineEdit()
+        self.q.setPlaceholderText("키나 기능으로 찾기 (예: 탭, F4, 북마크)")
+        self.q.setClearButtonEnabled(True)
+        self.q.textChanged.connect(self._filter)
+        lay.addWidget(self.q)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels(["키", "하는 일"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(8)
+        self.tree.setFocusPolicy(Qt.NoFocus)
+        self.tree.setColumnWidth(0, 250)
+        self.tree.setUniformRowHeights(True)
+        for group, rows in SHORTCUT_HELP:
+            g = QTreeWidgetItem([group, ""])
+            f = g.font(0)
+            f.setBold(True)
+            g.setFont(0, f)
+            g.setForeground(0, QColor("#aab4ff"))
+            g.setFlags(Qt.ItemIsEnabled)
+            self.tree.addTopLevelItem(g)
+            for key, _reg, desc in rows:
+                g.addChild(QTreeWidgetItem([key, desc]))
+            g.setExpanded(True)
+        lay.addWidget(self.tree, 1)
+        hint = QLabel("북마크 단축키는 북마크(또는 북마크 폴더/세트)를 우클릭 → '단축키 지정' 에서 정합니다.")
+        hint.setObjectName("dim")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.q.setFocus()
+
+    def _filter(self, text):
+        words = text.lower().split()
+        for i in range(self.tree.topLevelItemCount()):
+            g = self.tree.topLevelItem(i)
+            shown = 0
+            for j in range(g.childCount()):
+                it = g.child(j)
+                hay = (it.text(0) + " " + it.text(1) + " " + g.text(0)).lower()
+                ok = all(w in hay for w in words)
+                it.setHidden(not ok)
+                shown += ok
+            g.setHidden(shown == 0)
+
+
 # ───────────────────────── 메인 윈도우 ─────────────────────────
 class Main(QMainWindow):
     _ui = Signal(object)   # 작업 스레드에서 화면 갱신을 안전하게 요청
@@ -2707,6 +2811,7 @@ class Main(QMainWindow):
             sc(f"Ctrl+{i}", lambda i=i: self.open_key(i))              # 북마크에 지정한 단축키
         for key, kind in (("Alt+0", ""), ("Alt+-", "Desktop"), ("Alt+`", "Downloads"), ("Alt+=", "Documents")):
             sc(key, lambda kind=kind: self.alt_place(kind))
+        sc("F1", self.show_shortcuts)
         sc("Esc", self.on_escape)
 
     def rename_current(self):
@@ -4146,6 +4251,7 @@ class Main(QMainWindow):
         s.setChecked(startup_enabled())
         s.triggered.connect(self.toggle_startup)
         m.addSeparator()
+        m.addAction("단축키 보기  (F1)", self.show_shortcuts)
         m.addAction("검색 색인 (Everything)…", self.open_index_dialog)
         u = getattr(self, "updater", None)
         if u:
@@ -4157,6 +4263,9 @@ class Main(QMainWindow):
             ua.setChecked(u.auto)
             ua.triggered.connect(lambda v: u.set_auto(v))
         m.exec(self.opt_btn.mapToGlobal(self.opt_btn.rect().bottomLeft()))
+
+    def show_shortcuts(self):
+        ShortcutDialog(self).exec()
 
     def open_index_dialog(self):
         """설정 → 검색 색인: Everything 이 색인한 볼륨/폴더를 보고 폴더 색인을 추가/제거 (없으면 설치 안내)"""

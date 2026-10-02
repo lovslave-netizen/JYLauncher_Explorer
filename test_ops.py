@@ -204,6 +204,22 @@ def main():
     w.open_key(5)
     assert not opened
 
+    # 4-5) 단축키 보기: 등록된 모든 단축키가 목록에 있고, 목록의 키가 실제로 등록돼 있음
+    listed = {k for _g, rows in J.SHORTCUT_HELP for _key, reg, _d in rows for k in reg}
+    assert keys <= listed, sorted(keys - listed)                 # 등록은 됐는데 목록에 없는 키
+    assert listed <= keys, sorted(listed - keys)                 # 목록에는 있는데 등록 안 된 키 (오타)
+    dlg = J.ShortcutDialog(w)
+    assert dlg.tree.topLevelItemCount() == len(J.SHORTCUT_HELP)
+    dlg.q.setText("북마크")
+    shown = [dlg.tree.topLevelItem(i).text(0) for i in range(dlg.tree.topLevelItemCount()) if not dlg.tree.topLevelItem(i).isHidden()]
+    assert "북마크" in shown and "탭" not in shown, shown
+    dlg.q.setText("f4")
+    assert any(not dlg.tree.topLevelItem(i).child(j).isHidden() and dlg.tree.topLevelItem(i).child(j).text(0) == "F4"
+               for i in range(dlg.tree.topLevelItemCount()) for j in range(dlg.tree.topLevelItem(i).childCount()))
+    dlg.q.setText("zzzz없는키")
+    assert all(dlg.tree.topLevelItem(i).isHidden() for i in range(dlg.tree.topLevelItemCount()))
+    dlg.close()
+
     # 5) 드라이브 루트 Windows 메뉴 (포맷/속성 등): 셸을 쓸 수 있는 환경에서만
     try:
         import shellmenu as SM
