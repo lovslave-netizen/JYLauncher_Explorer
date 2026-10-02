@@ -135,6 +135,75 @@ def main():
     assert all(b.isVisible() for b, _s in pb._items) and not pb.ell.isVisible()
     pb.close()
 
+    # 4-4) 키보드: F3/F4/Ctrl+Tab 영역 이동, Alt+숫자, Ctrl+숫자 북마크 단축키
+    from PySide6.QtGui import QKeySequence, QShortcut
+    keys = {sc.key().toString() for sc in w.findChildren(QShortcut)}
+    for k in ["F3", "F4", "F7", "Ctrl+Tab", "Alt+`", "Alt+-", "Alt+=", "Alt+0"] + [f"Alt+{i}" for i in range(1, 10)] + [f"Ctrl+{i}" for i in range(1, 10)]:
+        assert k in keys, k
+    w.activateWindow()
+    pump(300)
+    w.focus_sidebar()
+    pump(100)
+    assert w.quick.hasFocus() and w.quick.currentItem() is not None and w.quick_panel.property("kfocus") is True
+    w.key_f3()                                         # 빠른 이동 → 북마크 트리
+    pump(100)
+    assert w.side_tree.hasFocus() and w._last_side == "tree" and w.tree_panel.property("kfocus") is True and w.quick_panel.property("kfocus") is False
+    w.key_f3()                                         # 다시 → 빠른 이동
+    pump(100)
+    assert w.quick.hasFocus()
+    w.toggle_area()                                    # Ctrl+Tab → 패널
+    pump(100)
+    assert not w.in_sidebar() and w.active_view().hasFocus()
+    w.toggle_area()                                    # 다시 → 마지막 사이드바 위치(빠른 이동)
+    pump(100)
+    assert w.quick.hasFocus()
+    w.key_f4()                                         # F4 → 패널
+    pump(100)
+    assert not w.in_sidebar()
+    # Enter 로 열기: 빠른 이동 / 북마크 트리
+    opened = []
+    w.open_path = lambda p, nt: opened.append((p, nt))
+    from PySide6.QtGui import QKeyEvent
+    w.focus_sidebar("quick")
+    w.quick.setCurrentRow(1)
+    QApplication.sendEvent(w.quick, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_Return, Qt.NoModifier))
+    assert opened and opened[-1][0] == w.quick.item(1).data(Qt.UserRole) and not opened[-1][1], opened
+    # Alt+숫자: 드라이브(보이는 순서), 장소
+    drv = [w.quick.item(r).data(Qt.UserRole) for r in range(w.quick.count()) if w.quick.item(r).data(Qt.UserRole + 3) == "drive"]
+    w.alt_drive(1)
+    assert opened[-1] == (drv[0], False)
+    w.alt_drive(len(drv))
+    assert opened[-1] == (drv[-1], False)
+    w.alt_place("Downloads")
+    assert opened[-1] == (os.path.join(J.HOME, "Downloads"), False)
+    w.alt_place("")
+    assert opened[-1] == ("", False)
+    assert "Alt+1" in w.quick.item([r for r in range(w.quick.count()) if w.quick.item(r).data(Qt.UserRole + 3) == "drive"][0]).toolTip()
+    # Ctrl+숫자: 북마크 단축키 지정/중복 이동/열기/해제
+    fa, fb = tempfile.mkdtemp(), tempfile.mkdtemp()
+    w.bm["children"] = [{"type": "bookmark", "name": "A북마크", "path": fa},
+                        {"type": "folder", "name": "묶음", "open": True, "children": [{"type": "bookmark", "name": "B북마크", "path": fb}]}]
+    w.bookmarks_changed()
+    w.set_key(w.bm["children"][0], 1)
+    w.set_key(w.bm["children"][1]["children"][0], 2)
+    w.open_key(1)
+    assert opened[-1] == (fa, False)
+    w.open_key(2)
+    assert opened[-1] == (fb, False)
+    w.set_key(w.bm["children"][1]["children"][0], 1)                   # 1번을 B 가 가져가면 A 는 해제
+    assert w.bm["children"][0].get("key") is None and w._node_with_key(1)["name"] == "B북마크"
+    labels = []
+    w.side_tree.build(w.bm, [], [], {})
+    assert any("[Ctrl+1]" in w.side_tree.topLevelItem(0).child(i).text(0) or
+               any("[Ctrl+1]" in w.side_tree.topLevelItem(0).child(i).child(j).text(0) for j in range(w.side_tree.topLevelItem(0).child(i).childCount()))
+               for i in range(w.side_tree.topLevelItem(0).childCount()))
+    w.set_key(w._node_with_key(1), None)
+    assert w._node_with_key(1) is None
+    w.open_key(5)                                                      # 지정 안 된 번호는 안내만
+    opened.clear()
+    w.open_key(5)
+    assert not opened
+
     # 5) 드라이브 루트 Windows 메뉴 (포맷/속성 등): 셸을 쓸 수 있는 환경에서만
     try:
         import shellmenu as SM

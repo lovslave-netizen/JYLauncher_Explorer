@@ -49,6 +49,8 @@ QSS = """
 QMainWindow, QWidget#root { background: #10121d; }
 QFrame#panel { background: rgba(255,255,255,0.035); border-radius: 14px; }
 QFrame#panel[active="true"] { background: rgba(124,140,255,0.10); border: 2px solid #8b98ff; }
+QFrame#panel[kfocus="false"] { border: 2px solid transparent; }
+QFrame#panel[kfocus="true"] { border: 2px solid #8b98ff; }
 QFrame#panel[active="false"][split="true"] { background: rgba(255,255,255,0.02); border: 2px solid transparent; }
 QFrame#panel[split="true"][active="false"] QTabBar::tab:selected { background: rgba(255,255,255,0.14); }
 QLabel#badge { background: #5b6cff; color: white; border-radius: 8px; padding: 2px 10px; font-size: 11px; font-weight: 700; }
@@ -1428,6 +1430,7 @@ class QuickList(QListWidget):
     openPath = Signal(str, bool)   # 경로, 새 탭 여부
     menuAt = Signal(object, object)  # 항목(dict, 없으면 None), 전역 좌표
     fitted = Signal(int)           # 격자가 차지하는 높이가 바뀜 (위쪽 네모 크기를 맞추는 용)
+    keyOpened = Signal()           # 키보드(Enter)로 열었음 → 포커스를 패널로
     GRID = QSize(40, 40)
 
     def __init__(self):
@@ -1460,6 +1463,13 @@ class QuickList(QListWidget):
                 entry = {"name": it.data(Qt.UserRole + 2), "path": it.data(Qt.UserRole), "builtin": True}
         self.menuAt.emit(entry, self.viewport().mapToGlobal(pos))
 
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.currentItem() is not None:
+            self.openPath.emit(self.currentItem().data(Qt.UserRole), False)
+            self.keyOpened.emit()
+            return
+        super().keyPressEvent(e)                    # 방향키는 격자 안에서 이동
+
     def wheelEvent(self, e):
         e.ignore()                                  # 스크롤 없이 항상 전부 보임 → 바깥 스크롤에 맡김
 
@@ -1489,29 +1499,45 @@ class QuickList(QListWidget):
             self.custom = custom
         if names is not None:
             self.names = names
+        keep = self.currentItem().data(Qt.UserRole) if self.currentItem() is not None else None
         self.clear()
+        drive_no = [0]
 
-        def add(name, path, icon, idx=-1, tip=""):
+        def add(name, path, icon, idx=-1, tip="", kind="folder", hot=""):
             shown = self.names.get(os.path.normcase(path), name)
+            if kind == "drive":
+                drive_no[0] += 1
+                hot = f"Alt+{drive_no[0]}" if drive_no[0] <= 9 else ""        # 드라이브는 보이는 순서대로 Alt+1 ~ Alt+9
             it = QListWidgetItem("")
             it.setData(Qt.UserRole, path)
             it.setData(Qt.UserRole + 1, idx)
             it.setData(Qt.UserRole + 2, shown)
+            it.setData(Qt.UserRole + 3, kind)
             it.setIcon(icon)
-            it.setToolTip(shown + (("\n" + (tip or path)) if (tip or path) and (tip or path) != shown else ""))
+            lines = [shown]
+            if (tip or path) and (tip or path) != shown:
+                lines.append(tip or path)
+            if hot:
+                lines.append(hot)
+            it.setToolTip("\n".join(lines))
             it.setSizeHint(self.GRID)
             self.addItem(it)
-        add("내 PC", "", _provider.icon(QFileIconProvider.Computer))
-        for name, sub in (("바탕화면", "Desktop"), ("다운로드", "Downloads"), ("문서", "Documents")):
+        add("내 PC", "", _provider.icon(QFileIconProvider.Computer), kind="pc", hot="Alt+0")
+        for name, sub, hot in (("바탕화면", "Desktop", "Alt+-"), ("다운로드", "Downloads", "Alt+`"), ("문서", "Documents", "Alt+=")):
             p = os.path.join(HOME, sub)
             if os.path.isdir(p):
-                add(name, p, _provider.icon(QFileInfo(p)))
+                add(name, p, _provider.icon(QFileInfo(p)), hot=hot)
         for i, c in enumerate(self.custom):
             icon = _provider.icon(QFileIconProvider.Network) if c.get("net") else _provider.icon(QFileIconProvider.Folder)
-            add(c["name"], c["path"], icon, i)
+            add(c["name"], c["path"], icon, i, kind="custom")
         for d in QDir.drives():
             p = d.absolutePath().replace("/", "\\")
-            add(drive_display(p), p, drive_icon(p), tip=p)
+            add(drive_display(p), p, drive_icon(p), tip=p, kind="drive")
+        if keep is not None:                         # 새로고침해도 선택해 둔 곳을 유지
+            for r in range(self.count()):
+                if self.item(r).data(Qt.UserRole) == keep:
+                    self.setCurrentRow(r)
+                    break
         self._fit()
 
 
@@ -2005,6 +2031,7 @@ class SideTree(QTreeWidget):
     menuAt = Signal(str, object, object)         # 종류('section'|'bm'|'path'), 데이터, 전역 좌표
     nodeDropped = Signal(object, object, str)    # 끌어온 노드, 대상 노드(None=맨 끝), 위치(before/after/group/end)
     dirsDropped = Signal(list, object)           # 폴더 경로들, 넣을 북마크 폴더 노드(None=맨 위 단계)
+    keyOpened = Signal()                         # 키보드(Enter)로 열었음 → 포커스를 패널로
     stateChanged = Signal()                      # 접기/펼치기 상태가 바뀜(저장 필요)
 
     def __init__(self):
@@ -2060,7 +2087,7 @@ class SideTree(QTreeWidget):
         for n in kids:
             if n.get("path2"):                   # 세트 북마크는 위쪽 바에서만 보여줌
                 continue
-            it = QTreeWidgetItem([n["name"]])
+            it = QTreeWidgetItem([n["name"] + (f"   [Ctrl+{n['key']}]" if n.get("key") else "")])
             it.setData(0, Qt.UserRole, ("bm", n))
             if n["type"] == "folder":
                 parent.addChild(it)
@@ -2071,7 +2098,7 @@ class SideTree(QTreeWidget):
             else:
                 it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled)
                 it.setIcon(0, tree_icon("none", True, n.get("mark")))
-                it.setToolTip(0, n["name"] + "\n" + n["path"])
+                it.setToolTip(0, n["name"] + "\n" + n["path"] + (f"\nCtrl+{n['key']}" if n.get("key") else ""))
                 parent.addChild(it)
 
     def _add_path(self, parent, p, src):
@@ -2103,6 +2130,16 @@ class SideTree(QTreeWidget):
             self.openPath.emit(d[1] if d[0] == "path" else d[1]["path"], False)
         else:                                    # 섹션/북마크 폴더: 접기 ↔ 펼치기
             it.setExpanded(not it.isExpanded())
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.currentItem() is not None:
+            it = self.currentItem()
+            d = it.data(0, Qt.UserRole)
+            self._clicked(it, 0)                    # 북마크/최근/자주 = 열기, 섹션/폴더 = 접기·펼치기
+            if d and (d[0] == "path" or (d[0] == "bm" and d[1]["type"] == "bookmark")):
+                self.keyOpened.emit()
+            return
+        super().keyPressEvent(e)                    # ↑↓ 이동, → 펼치기, ← 접기
 
     def wheelEvent(self, e):
         if not shift_wheel(self, e):
@@ -2452,8 +2489,8 @@ class Main(QMainWindow):
             b.clicked.connect(lambda _=False: fn())
             bar.addWidget(b)
             return b
-        self.one_btn = btn(view_icon(False), self.toggle_split, "패널 1개 보기 (F3 로 전환)", True)
-        self.split_btn = btn(view_icon(True), self.toggle_split, "패널 2개 보기 (F3 로 전환)", True)
+        self.one_btn = btn(view_icon(False), self.toggle_split, "패널 1개 보기 (F7 로 전환)", True)
+        self.split_btn = btn(view_icon(True), self.toggle_split, "패널 2개 보기 (F7 로 전환)", True)
         grp = QButtonGroup(self)
         grp.setExclusive(True)
         grp.addButton(self.one_btn)
@@ -2502,6 +2539,8 @@ class Main(QMainWindow):
         body = QSplitter(Qt.Horizontal)
         side = QFrame()
         side.setObjectName("panel")
+        side.setProperty("kfocus", False)
+        self.quick_panel = side
         sl = QVBoxLayout(side)
         sl.setContentsMargins(8, 8, 8, 8)
         sl.setSpacing(2)
@@ -2527,6 +2566,7 @@ class Main(QMainWindow):
         self.quick = QuickList()
         self.quick.openPath.connect(self.open_path)
         self.quick.menuAt.connect(self.quick_menu)
+        self.quick.keyOpened.connect(self.focus_panes)
         sl.addWidget(self.quick, 1)
         side.setMinimumWidth(165)
         self.quick.fitted.connect(lambda h, side=side: side.setFixedHeight(h + 52))      # 머리글 + 여백
@@ -2534,6 +2574,8 @@ class Main(QMainWindow):
         # 왼쪽 아래 네모: 북마크 / 최근 / 자주 가는 곳 (트리)
         side2 = QFrame()
         side2.setObjectName("panel")
+        side2.setProperty("kfocus", False)
+        self.tree_panel = side2
         tl = QVBoxLayout(side2)
         tl.setContentsMargins(8, 8, 8, 8)
         tl.setSpacing(2)
@@ -2552,6 +2594,7 @@ class Main(QMainWindow):
         self.side_tree.openPath.connect(self.open_path)
         self.side_tree.openFolderAsTabs.connect(self.open_all)
         self.side_tree.menuAt.connect(self.side_menu)
+        self.side_tree.keyOpened.connect(self.focus_panes)
         self.side_tree.nodeDropped.connect(self.on_bm_drop)
         self.side_tree.dirsDropped.connect(self.on_bookmark_drop)
         self.side_tree.stateChanged.connect(self._side_state_changed)
@@ -2638,15 +2681,16 @@ class Main(QMainWindow):
     def setup_shortcuts(self):
         def sc(key, fn):
             QShortcut(QKeySequence(key), self, activated=fn)
-        sc("F3", lambda: (self.one_btn if self.split_btn.isChecked() else self.split_btn).click())
+        sc("F7", lambda: (self.one_btn if self.split_btn.isChecked() else self.split_btn).click())      # 1개 ↔ 2개 보기
+        sc("F3", self.key_f3)                                  # 사이드바(빠른 이동 ↔ 북마크) 로 / 안에서 번갈아
         sc("F5", lambda: self.to_other("copy"))
         sc("F6", lambda: self.to_other("move"))
         sc("Ctrl+T", lambda: self.active.add_tab(self.active_view().path))
         sc("Ctrl+W", lambda: self.active.close_current())
         sc("Ctrl+PgUp", lambda: self.active.cycle(-1))        # 탭 이동
         sc("Ctrl+PgDown", lambda: self.active.cycle(1))
-        sc("Ctrl+Tab", self.switch_pane)                      # 패널 이동
-        sc("Ctrl+Shift+Tab", self.switch_pane)
+        sc("Ctrl+Tab", self.toggle_area)                      # 사이드바 ↔ 패널
+        sc("Ctrl+Shift+Tab", self.toggle_area)
         sc("Ctrl+Alt+Right", self.send_tab_to_other)          # 현재 탭을 반대편 패널로 보내기
         sc("Ctrl+Alt+Left", self.send_tab_to_other)
         sc("Ctrl+L", lambda: (self.active.pathbar.setFocus(), self.active.pathbar.selectAll()))
@@ -2655,9 +2699,14 @@ class Main(QMainWindow):
         sc("Ctrl+D", lambda: self.toggle_bookmark(self.active_view().path))
         sc("Ctrl+Shift+D", self.add_pair_bookmark)
         sc("Ctrl+H", self.toggle_hidden)
-        sc("F4", lambda: self.switch_pane())
+        sc("F4", self.key_f4)                                  # 패널로 / 패널끼리 이동
         sc("Ctrl+R", lambda: self.active_view().search_page is None and self.active_view().refresh())
         sc("F2", self.rename_current)
+        for i in range(1, 10):
+            sc(f"Alt+{i}", lambda i=i: self.alt_drive(i))              # 드라이브 (보이는 순서대로: C=1, D=2 …)
+            sc(f"Ctrl+{i}", lambda i=i: self.open_key(i))              # 북마크에 지정한 단축키
+        for key, kind in (("Alt+0", ""), ("Alt+-", "Desktop"), ("Alt+`", "Downloads"), ("Alt+=", "Documents")):
+            sc(key, lambda kind=kind: self.alt_place(kind))
         sc("Esc", self.on_escape)
 
     def rename_current(self):
@@ -2882,6 +2931,132 @@ class Main(QMainWindow):
             self.say(f"마지막 탭이라 복제해서 {o.side} 패널에 열었습니다")
         self.set_active(o)
 
+    # ---- 키보드로 영역 이동: F3 사이드바 / F4 패널 / Ctrl+Tab 번갈아 ----
+    _last_side = "quick"
+
+    def _within(self, w, root):
+        while w is not None:
+            if w is root:
+                return True
+            w = w.parentWidget()
+        return False
+
+    def in_sidebar(self):
+        w = QApplication.focusWidget()
+        return self._within(w, self.quick) or self._within(w, self.side_tree)
+
+    def focus_sidebar(self, which=None):
+        """사이드바로 포커스. which: 'quick'(아이콘 줄) | 'tree'(북마크 트리) | None = 마지막으로 있던 곳"""
+        which = which or self._last_side
+        tgt = self.quick if which == "quick" else self.side_tree
+        if which == "quick":
+            if tgt.currentItem() is None and tgt.count():
+                tgt.setCurrentRow(0)
+        elif tgt.currentItem() is None:
+            sec = tgt.topLevelItem(0)
+            pick = next((sec.child(i) for i in range(sec.childCount()) if sec.child(i).flags() & Qt.ItemIsSelectable), None) \
+                if sec is not None and sec.isExpanded() else None
+            if pick is not None or sec is not None:
+                tgt.setCurrentItem(pick or sec)
+        tgt.setFocus(Qt.TabFocusReason)
+        self._last_side = which
+        self._mark_side_focus(tgt)
+
+    def focus_panes(self):
+        v = self.active_view()
+        if v is None:
+            return
+        if v.search_page is not None:
+            v.search_page.focus_query()
+        else:
+            v.setFocus()
+
+    def key_f3(self):
+        w = QApplication.focusWidget()
+        if self._within(w, self.quick):
+            self.focus_sidebar("tree")
+        elif self._within(w, self.side_tree):
+            self.focus_sidebar("quick")
+        else:
+            self.focus_sidebar()                       # 마지막으로 선택했던 곳으로
+
+    def key_f4(self):
+        if self.in_sidebar() or not self.other_pane():
+            self.focus_panes()
+        else:
+            self.switch_pane()
+
+    def toggle_area(self):
+        self.focus_panes() if self.in_sidebar() else self.focus_sidebar()
+
+    def _mark_side_focus(self, w):
+        q, t = self._within(w, self.quick), self._within(w, self.side_tree)
+        if q:
+            self._last_side = "quick"
+        if t:
+            self._last_side = "tree"
+        for frame, on in ((self.quick_panel, q), (self.tree_panel, t)):
+            if frame.property("kfocus") != on:
+                frame.setProperty("kfocus", on)
+                frame.style().unpolish(frame)
+                frame.style().polish(frame)
+
+    # ---- Alt+숫자(드라이브/장소), Ctrl+숫자(북마크 단축키) ----
+    def alt_drive(self, n):
+        drives = [self.quick.item(r) for r in range(self.quick.count()) if self.quick.item(r).data(Qt.UserRole + 3) == "drive"]
+        if 1 <= n <= len(drives):
+            self.open_path(drives[n - 1].data(Qt.UserRole), False)
+        else:
+            self.say(f"Alt+{n} 에 해당하는 드라이브가 없습니다")
+
+    def alt_place(self, sub):
+        self.open_path(os.path.join(HOME, sub) if sub else "", False)
+
+    def _nodes(self, kids=None):
+        for n in (self.bm["children"] if kids is None else kids):
+            yield n
+            if n["type"] == "folder":
+                yield from self._nodes(n["children"])
+
+    def _node_with_key(self, k):
+        return next((n for n in self._nodes() if n.get("key") == k), None)
+
+    def open_key(self, k):
+        n = self._node_with_key(k)
+        if n is None:
+            self.say(f"Ctrl+{k} 에 지정된 북마크가 없습니다 (북마크 우클릭 → 단축키 지정)")
+            return
+        if n["type"] == "folder":
+            self.open_all(n)
+        elif n.get("path2"):
+            self.open_pair(n)
+        else:
+            self.open_path(n["path"], False)
+
+    def set_key(self, n, k):
+        """북마크/폴더/세트에 Ctrl+k 지정 (다른 항목이 쓰던 번호면 그쪽에서 빠짐). k=None 이면 해제"""
+        if k is not None:
+            other = self._node_with_key(k)
+            if other is not None and other is not n:
+                other.pop("key", None)
+            n["key"] = k
+        else:
+            n.pop("key", None)
+        self.bookmarks_changed()
+
+    def add_key_menu(self, m, n):
+        cur = n.get("key")
+        sub = m.addMenu("단축키 지정 (Ctrl+번호)" + (f"  —  지금 Ctrl+{cur}" if cur else ""))
+        for k in range(1, 10):
+            holder = self._node_with_key(k)
+            label = f"Ctrl+{k}" + (f"      (지금: {holder['name']})" if holder is not None and holder is not n else "")
+            a = sub.addAction(label, lambda k=k: self.set_key(n, k))
+            a.setCheckable(True)
+            a.setChecked(cur == k)
+        if cur:
+            sub.addSeparator()
+            sub.addAction("단축키 해제", lambda: self.set_key(n, None))
+
     def switch_pane(self):
         o = self.other_pane()
         if o:
@@ -2899,6 +3074,7 @@ class Main(QMainWindow):
         return False
 
     def on_focus(self, old, new):
+        self._mark_side_focus(new)
         w = new
         while w is not None:
             if isinstance(w, Pane):
@@ -3506,6 +3682,7 @@ class Main(QMainWindow):
                 m.addAction("폴더 풀기 (안의 북마크를 밖으로)", lambda: self.unwrap_folder(n))
             m.addSeparator()
             self.add_mark_menu(m, n)
+            self.add_key_menu(m, n)
             m.addAction("이름 변경…", lambda: self.rename_node(n))
             m.addAction("위로 이동", lambda: self.move_node(n, -1))
             m.addAction("아래로 이동", lambda: self.move_node(n, 1))
@@ -3992,7 +4169,7 @@ class Main(QMainWindow):
         if not sets:
             m.addAction("(저장된 세트가 없습니다)").setEnabled(False)
         for n in sets:
-            m.addAction(pair_icon(n.get("mark")), n["name"], lambda n=n: self.open_pair(n))
+            m.addAction(pair_icon(n.get("mark")), n["name"] + (f"      Ctrl+{n['key']}" if n.get("key") else ""), lambda n=n: self.open_pair(n))
         m.addSeparator()
         m.addAction("현재 양쪽 폴더를 세트로 저장  (Ctrl+Shift+D)", self.add_pair_bookmark)
         if sets:
@@ -4001,6 +4178,7 @@ class Main(QMainWindow):
                 sub = mg.addMenu(pair_icon(n.get("mark")), n["name"])
                 sub.addAction("이름 변경…", lambda n=n: self.rename_node(n))
                 self.add_mark_menu(sub, n)
+                self.add_key_menu(sub, n)
                 sub.addAction("앞으로 이동", lambda n=n: self.move_node(n, -1))
                 sub.addAction("뒤로 이동", lambda n=n: self.move_node(n, 1))
                 sub.addAction("두 개의 북마크로 나누기 (왼쪽 트리로)", lambda n=n: self.split_pair(n))
