@@ -246,6 +246,7 @@ class ShellMenu:
     def track(self, x, y):
         hwnd = _owner()
         _state["ctx"] = self.ctx2
+        prev = win32gui.GetForegroundWindow()       # 메뉴가 끝나면 키보드 포커스를 원래 창으로 돌려줌 (안 그러면 바로 Ctrl+V 가 먹지 않음)
         try:
             win32gui.SetForegroundWindow(hwnd)
         except Exception:
@@ -256,6 +257,11 @@ class ShellMenu:
         finally:
             _state["ctx"] = None
             win32gui.PostMessage(hwnd, win32con.WM_NULL, 0, 0)
+            try:
+                if prev and win32gui.IsWindow(prev):
+                    win32gui.SetForegroundWindow(prev)
+            except Exception:
+                pass
         return cmd or 0
 
     def verb(self, cmd):
