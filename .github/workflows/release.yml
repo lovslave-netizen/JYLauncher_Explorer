@@ -59,6 +59,10 @@ jobs:
         shell: pwsh
         run: ./ci_test.ps1 test_ops.py
 
+      - name: 테스트 - 특수 열기(dxb)
+        shell: pwsh
+        run: ./ci_test.ps1 test_specialopen.py
+
       - name: 테스트 - 화면 스모크
         shell: pwsh
         run: ./ci_test.ps1 test_smoke.py

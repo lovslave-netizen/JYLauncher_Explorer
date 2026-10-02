@@ -32,6 +32,7 @@ import fileops as F
 import favsync as FSY
 import filesearch as FS
 import newmenu
+import specialopen
 import mediainfo as MI
 import search_ui as SUI
 from jycommon import (BACKUP_DIR, BOOKMARKS_FILE, EXPLORER_FILE, FROZEN, INSTANCE_SUFFIX, LAUNCHER_FILE, add_item_to_launcher, app_icon, backup_favorites, cleanup_backups, read_backup,
@@ -307,6 +308,7 @@ class FileView(QTreeView):
     ORDER = [0, 3, 2, 1] + list(range(4, FSModel.N_TOTAL))    # 화면 순서: 이름 / 수정한 날짜 / 확장자 / 크기
     HIDDEN = set(range(4, FSModel.N_TOTAL))                   # 기본은 정보 열 숨김 (헤더 우클릭으로 켬)
     on_cols_changed = None
+    notify = None                                  # 특수 열기(dxb 등)의 진행/결과를 상태줄에 알리는 함수 (Main 이 지정)
 
     def __init__(self, path, show_hidden=False):
         super().__init__()
@@ -543,6 +545,8 @@ class FileView(QTreeView):
         p = self.model_.filePath(idx.siblingAtColumn(0))
         if os.path.isdir(p):
             self.navigate(p)
+        elif specialopen.open_special(p, FileView.notify):
+            pass
         else:
             try:
                 os.startfile(p)
@@ -585,6 +589,8 @@ class FileView(QTreeView):
             for p in (self.selected_paths() or []):
                 if os.path.isdir(p) and len(self.selected_paths()) == 1:
                     self.navigate(p)
+                elif specialopen.open_special(p, FileView.notify):
+                    pass
                 else:
                     try:
                         os.startfile(p)
@@ -2320,6 +2326,8 @@ class Main(QMainWindow):
         self.quitting = False
         self.tray_ok = False
         self.hook = None
+        specialopen.set_rules(self.data.get("special_open"))          # 파일 형식별 특수 열기 규칙 (기본: .dxb → Duxbury)
+        FileView.notify = lambda msg: self._ui.emit(lambda: self.say(msg))
         self.data.pop("workspaces", None)                      # 작업공간 기능은 없어짐 (세트 북마크로 충분)
         self.data.pop("sub_search", None)
         self.quick_items = self.data.setdefault("quick", [])   # 빠른 이동에 내가 추가한 항목
@@ -2642,6 +2650,8 @@ class Main(QMainWindow):
     def open_search_result(self, pane, path, is_dir):
         if is_dir:
             pane.enter_folder_from_search(path)    # 이 탭 안에서 폴더로 들어감 (◀ 뒤로 = 검색 결과로 복귀). 새 탭은 우클릭 → 새 탭에서 열기
+        elif specialopen.open_special(path, FileView.notify):
+            pass
         else:
             try:
                 os.startfile(path)
@@ -3130,7 +3140,7 @@ class Main(QMainWindow):
                     add("경로 복사", lambda: QApplication.clipboard().setText("\r\n".join(paths)))
                     add("런처에 추가", lambda: self.add_to_launcher(paths))
                 else:
-                    add("열기", lambda: [os.startfile(x) for x in paths[:20]])
+                    add("열기", lambda: [specialopen.open_special(x, FileView.notify) or os.startfile(x) for x in paths[:20]])
                     add("경로 복사", lambda: QApplication.clipboard().setText("\r\n".join(paths)))
                     add("런처에 추가", lambda: self.add_to_launcher(paths))
                 if other:
