@@ -1067,7 +1067,21 @@ class Pane(QFrame):
         b.setFocusPolicy(Qt.NoFocus)
         return b
 
+    def _drop_target_pane(self, global_pos):
+        """탭을 끌어 놓은 곳이 반대편 패널 위면 그 패널 (2개 보기일 때만)"""
+        for p in self.main.panes:
+            if p is not self and p.isVisible() and p.rect().contains(p.mapFromGlobal(global_pos)):
+                return p
+        return None
+
     def eventFilter(self, obj, e):
+        if obj is self.tabbar and e.type() == e.Type.MouseButtonPress and e.button() == Qt.LeftButton:
+            i = self.tabbar.tabAt(e.position().toPoint())
+            self._press_vid = self.tabbar.tabData(i) if i >= 0 else None
+        if obj is self.tabbar and e.type() == e.Type.MouseButtonRelease and e.button() == Qt.LeftButton:
+            vid, self._press_vid = getattr(self, "_press_vid", None), None
+            if vid is not None and vid in self.views and self._drop_target_pane(e.globalPosition().toPoint()):
+                QTimer.singleShot(0, lambda: self.main.send_tab_to_other(self, vid))      # 탭 끌기가 끝난 뒤에 넘김
         if obj is self.tabbar and e.type() == e.Type.MouseButtonRelease and e.button() == Qt.MiddleButton:
             i = self.tabbar.tabAt(e.position().toPoint())
             if i >= 0:
