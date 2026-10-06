@@ -310,6 +310,33 @@ def main():
     assert lw._hdr == -1
     print("launcher header keys OK", flush=True)
 
+    # 9) 최근 · 보관함: 핀 꽂기 → 오른쪽 보관함에 확장자별로 묶임, 중복은 거부, ← → 로 좌우 이동
+    td = tempfile.mkdtemp()
+    fs = []
+    for n in ("a.xlsx", "b.xlsx", "c.hwp", "noext"):
+        p = os.path.join(td, n)
+        open(p, "w").write("x")
+        fs.append(p)
+    lw.vault.root["children"] = []
+    lw.vault.set_sort("확장자별")
+    assert lw.vault.pin_item({"path": fs[0], "name": "a.xlsx"}) is True
+    assert lw.vault.pin_item({"path": fs[0], "name": "a.xlsx"}) is False          # 이미 있음
+    for p in fs[1:]:
+        lw.vault.pin_item({"path": p, "name": os.path.basename(p)})
+    names = [lw.vault.tree.topLevelItem(i).text(0).split("  ")[-1] for i in range(lw.vault.tree.topLevelItemCount())]
+    assert names == ["HWP", "XLSX", "기타"], names
+    assert lw.vault.tree.topLevelItem(1).childCount() == 2
+    rv = lw.recent_vault
+    rv.set_side(0)
+    rv.handle_key(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_Right, Qt.NoModifier))
+    assert rv.side == 1
+    lw.vault.tree.setCurrentItem(lw.vault.tree.topLevelItem(0).child(0))                  # 묶음 안의 파일 위에서 ← → 최근으로
+    rv.handle_key(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_Left, Qt.NoModifier))
+    assert rv.side == 0
+    lw.vault.set_filter("xlsx")
+    assert lw.vault.tree.topLevelItemCount() == 1
+    print("recent+vault page OK", flush=True)
+
 
 try:
     main()

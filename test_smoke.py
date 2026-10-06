@@ -118,7 +118,7 @@ def main():
     i = sp.scope.count() - 1
     sp.scope.setItemData(i, root)
     sp.scope.setCurrentIndex(i)
-    lw.goto(3)
+    lw.goto(2)
     lw.search.setText("report")
     wait_for(lambda: sp.tree.topLevelItemCount() == 1, "런처 파일 검색 결과 1개 (하나는 위에서 이름을 바꿨음)")
     sp.app_btn.setChecked(True)

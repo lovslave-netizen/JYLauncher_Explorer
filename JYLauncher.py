@@ -1,4 +1,4 @@
-"""JY Launcher - Big Picture 스타일 전체화면 런처 (런처 / 최근 / 고정 보관함)
+"""JY Launcher - Big Picture 스타일 전체화면 런처 (런처 / 최근·보관함 / 검색 / 설정)
 
 실행:  pythonw JYLauncher.py      (콘솔 없이)   /   python JYLauncher.py
 데이터: %APPDATA%/JYTools/ (launcher.json, vault.json, settings.json) - 경로 규칙은 jycommon.py 참고
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QSystemTrayIcon
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFileDialog, QMessageBox,
     QFileIconProvider, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMenu, QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QStackedWidget,
+    QLineEdit, QMenu, QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QSplitter, QStackedWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -60,6 +60,8 @@ QLabel#clock { font-size: 20px; font-weight: 600; color: #c9cdea; }
 QLabel#pageTitle { font-size: 26px; font-weight: 700; }
 QLabel#dim, QLabel#hint { color: #7f86aa; font-size: 12px; }
 QLabel#toast { color: #9fe8c5; font-size: 13px; font-weight: 600; }
+QLabel#rvhead { font-size: 15px; font-weight: 700; color: #7f86aa; padding: 2px 4px; }
+QLabel#rvhead[on="true"] { color: #aab4ff; border-bottom: 2px solid #7c8cff; }
 
 QLineEdit#search { background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.08);
     border-radius: 18px; padding: 9px 18px; font-size: 15px; min-width: 340px; selection-background-color: #7c8cff; }
@@ -1006,7 +1008,7 @@ class RecentPage(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.tree = make_tree()
-        self.tree.setColumnWidth(0, 520)
+        self.tree.setColumnWidth(0, 230)
         self.tree.itemClicked.connect(lambda it, _c: self.activated.emit(it.data(0, Qt.UserRole)))
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.menu)
@@ -1025,7 +1027,7 @@ class RecentPage(QWidget):
         a = m.addAction("폴더 위치 열기 (JY Explorer)", lambda: open_in_explorer(target if os.path.isdir(target) else os.path.dirname(target)))
         b = m.addAction("파일 위치 열기 (Windows 탐색기에서 선택)", lambda: reveal(target))
         c = m.addAction("경로 복사", lambda: QApplication.clipboard().setText(os.path.normpath(target)))
-        d = m.addAction("보관함에 고정", lambda: self.pin_lnk(lnk, it.text(0)))
+        d = m.addAction("핀 꽂기 (오른쪽 보관함에 고정)", lambda: self.pin_lnk(lnk, it.text(0)))
         e = m.addAction("런처에 추가", lambda: self.addRequested.emit(target))
         for act in (a, b, c, d, e):
             act.setEnabled(bool(target))                  # 가리키는 대상이 없어진 항목은 열기/지우기만
@@ -1085,7 +1087,7 @@ class RecentPage(QWidget):
         return False
 
 
-SORTS = ["사용자 지정", "파일명", "확장자", "수정 날짜", "최근 사용"]
+SORTS = ["확장자별", "사용자 지정", "파일명", "확장자", "수정 날짜", "최근 사용"]
 
 
 class VaultPage(QWidget):
@@ -1098,8 +1100,9 @@ class VaultPage(QWidget):
         self.filter, self.sort, self.nodes = "", settings.get("sort", SORTS[0]), []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        self._gopen = {}                                  # 확장자별 묶음 보기에서 접어 둔 묶음 기억
         self.tree = make_tree(VaultTree)
-        self.tree.setColumnWidth(0, 520)
+        self.tree.setColumnWidth(0, 300)
         self.tree.itemClicked.connect(self.on_click)
         self.tree.changed.connect(self.on_dropped)
         self.tree.filesDropped.connect(self.on_files)
@@ -1131,7 +1134,10 @@ class VaultPage(QWidget):
         self.tree.setDragDropMode(QAbstractItemView.InternalMove if self.is_custom()
                                   else QAbstractItemView.NoDragDrop)
         self.tree.setAcceptDrops(True)
-        self._fill(self.tree.invisibleRootItem(), self.root["children"])
+        if self.sort == "확장자별":
+            self._fill_grouped(self.tree.invisibleRootItem())
+        else:
+            self._fill(self.tree.invisibleRootItem(), self.root["children"])
         self.tree.setUpdatesEnabled(True)
         if self.tree.topLevelItemCount() and self.tree.currentItem() is None:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
@@ -1174,6 +1180,50 @@ class VaultPage(QWidget):
                 it.setIcon(0, file_icon(n["path"]))
                 parent.addChild(it)
 
+    # ---- 확장자별 묶음 (xlsx 는 xlsx 끼리, hwp 는 hwp 끼리 — 폴더 구조와 상관없이 모아서 보여 줌) ----
+    def _files(self, children):
+        for n in children:
+            if n["type"] == "folder":
+                yield from self._files(n["children"])
+            else:
+                yield n
+
+    @staticmethod
+    def _group_of(n):
+        if os.path.isdir(n["path"]):
+            return "폴더"
+        return os.path.splitext(n["path"])[1].lstrip(".").upper() or "기타"
+
+    def _fill_grouped(self, parent):
+        groups = {}
+        for n in self._files(self.root["children"]):
+            if self._matches(n):
+                groups.setdefault(self._group_of(n), []).append(n)
+        for g in sorted(groups, key=lambda g: (g == "기타", g != "폴더", g)):
+            gn = {"type": "group", "name": g}
+            self.nodes.append(gn)
+            it = QTreeWidgetItem()
+            it.setData(0, Qt.UserRole + 1, "group")
+            it.setData(0, Qt.UserRole + 2, len(self.nodes) - 1)
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDropEnabled)
+            parent.addChild(it)
+            for n in sorted(groups[g], key=lambda n: n["name"].lower()):
+                self.nodes.append(n)
+                ch = QTreeWidgetItem()
+                ch.setData(0, Qt.UserRole + 1, "file")
+                ch.setData(0, Qt.UserRole + 2, len(self.nodes) - 1)
+                ch.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                ch.setText(0, n["name"])
+                ch.setText(1, os.path.dirname(n["path"]))
+                ch.setForeground(1, QColor("#7f86aa"))
+                ch.setIcon(0, file_icon(n["path"]))
+                it.addChild(ch)
+            it.setExpanded(self._gopen.get(g, True) or bool(self.filter))
+            self._folder_text(it, gn)
+            it.setText(1, f"{it.childCount()}개")
+            it.setForeground(1, QColor("#7f86aa"))
+            it.setFont(0, QFont(FONT_FAMILY, 11, QFont.Bold))
+
     def _folder_text(self, it, n):
         it.setText(0, ("−  " if it.isExpanded() else "+  ") + n["name"])
 
@@ -1198,6 +1248,8 @@ class VaultPage(QWidget):
 
     def on_files(self, paths, target_item):
         target = self.node_of(target_item) if target_item is not None else self.root
+        if target.get("type") == "group":
+            target = self.root
         self.add_paths(paths, target)
 
     def add_paths(self, paths, target=None):
@@ -1211,8 +1263,16 @@ class VaultPage(QWidget):
         self.save()
         self.render()
 
+    def has_path(self, path):
+        key = os.path.normcase(os.path.normpath(path))
+        return any(os.path.normcase(os.path.normpath(n["path"])) == key for n in self._files(self.root["children"]))
+
     def pin_item(self, it):
+        """핀 꽂기. 이미 있으면 False"""
+        if self.has_path(it["path"]):
+            return False
         self.add_paths([it["path"]])
+        return True
 
     def set_filter(self, text):
         self.filter = text.strip().lower()
@@ -1227,7 +1287,12 @@ class VaultPage(QWidget):
     # ---- 동작 ----
     def on_click(self, it, _c):
         n = self.node_of(it)
-        if n["type"] == "folder":
+        if n["type"] == "group":
+            it.setExpanded(not it.isExpanded())
+            self._folder_text(it, n)
+            if not self.filter:
+                self._gopen[n["name"]] = it.isExpanded()
+        elif n["type"] == "folder":
             it.setExpanded(not it.isExpanded())
             self._folder_text(it, n)
             if not self.filter:
@@ -1246,7 +1311,9 @@ class VaultPage(QWidget):
         if n["type"] == "folder":
             return n
         p = it.parent()
-        return self.node_of(p) if p else self.root
+        if p is None or self.node_of(p)["type"] == "group":
+            return self.root
+        return self.node_of(p)
 
     def add_folder(self):
         name, ok = QInputDialog.getText(self, "새 폴더", "폴더 이름:")
@@ -1275,7 +1342,7 @@ class VaultPage(QWidget):
 
     def delete_current(self):
         it = self.tree.currentItem()
-        if it is not None:
+        if it is not None and self.node_of(it)["type"] != "group":
             self._remove(self.node_of(it))
             self.save()
             self.render()
@@ -1288,11 +1355,15 @@ class VaultPage(QWidget):
             n = self.node_of(it)
             if n["type"] == "file":
                 m.addAction("열기", lambda: self.on_click(it, 0))
+                m.addAction("폴더 위치 열기 (JY Explorer)", lambda: open_in_explorer(n["path"] if os.path.isdir(n["path"]) else os.path.dirname(n["path"])))
                 m.addAction("파일 위치 열기", lambda: reveal(n["path"]))
-            m.addAction("이름 변경…", lambda: self.rename(n))
-            m.addAction("삭제", self.delete_current)
-            m.addSeparator()
-        m.addAction("새 폴더…", self.add_folder)
+                m.addAction("경로 복사", lambda: QApplication.clipboard().setText(os.path.normpath(n["path"])))
+            if n["type"] != "group":
+                m.addAction("이름 변경…", lambda: self.rename(n))
+                m.addAction("보관함에서 빼기", self.delete_current)
+                m.addSeparator()
+        if self.sort != "확장자별":
+            m.addAction("새 폴더…", self.add_folder)
         m.addAction("파일 추가…", self.add_files)
         m.addAction("폴더 추가…", self.add_dir)
         m.exec(self.tree.viewport().mapToGlobal(pos))
@@ -1312,15 +1383,85 @@ class VaultPage(QWidget):
             return False
         if e.key() in (Qt.Key_Return, Qt.Key_Enter):
             self.on_click(it, 0)
-        elif e.key() == Qt.Key_Right and self.node_of(it)["type"] == "folder" and not it.isExpanded():
+        elif e.key() == Qt.Key_Right and self.node_of(it)["type"] in ("folder", "group") and not it.isExpanded():
             self.on_click(it, 0)
-        elif e.key() == Qt.Key_Left and self.node_of(it)["type"] == "folder" and it.isExpanded():
+        elif e.key() == Qt.Key_Left and self.node_of(it)["type"] in ("folder", "group") and it.isExpanded():
             self.on_click(it, 0)
         elif e.key() == Qt.Key_Delete:
             self.delete_current()
         else:
             return False
         return True
+
+
+class RecentVaultPage(QWidget):
+    """한 화면에 왼쪽 '최근 항목', 오른쪽 '보관함'(핀 꽂은 항목, 확장자별 묶음). 최근 항목 우클릭 → 핀 꽂기 하면 오른쪽으로 넘어감"""
+
+    def __init__(self, recent, vault):
+        super().__init__()
+        self.recent, self.vault, self.side = recent, vault, 0
+        self.heads, self.views = [], (recent, vault)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+        for title, page in (("최근 항목", recent), ("보관함  ·  핀 꽂은 항목", vault)):
+            box = QWidget()
+            v = QVBoxLayout(box)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(6)
+            head = QLabel(title)
+            head.setObjectName("rvhead")
+            self.heads.append(head)
+            v.addWidget(head)
+            v.addWidget(page, 1)
+            split.addWidget(box)
+            page.tree.viewport().installEventFilter(self)
+        split.setSizes([500, 500])
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        lay.addWidget(split)
+        self.set_side(0)
+
+    def eventFilter(self, obj, e):
+        if e.type() == e.Type.MouseButtonPress:
+            for i, p in enumerate(self.views):
+                if obj is p.tree.viewport():
+                    self.set_side(i)
+        return super().eventFilter(obj, e)
+
+    def set_side(self, i):
+        self.side = i
+        for k, h in enumerate(self.heads):
+            on = k == i
+            if h.property("on") != on:
+                h.setProperty("on", on)
+                _repolish(h)
+
+    def cur(self):
+        return self.views[self.side]
+
+    def set_filter(self, text):
+        self.recent.set_filter(text)
+        self.vault.set_filter(text)
+
+    def at_top(self):
+        t = self.cur().tree
+        return t.currentItem() is None or not t.indexAbove(t.currentIndex()).isValid()
+
+    def handle_key(self, e):
+        k = e.key()
+        if k == Qt.Key_Right and self.side == 0:               # 최근 → 보관함
+            self.set_side(1)
+            if self.vault.tree.currentItem() is None and self.vault.tree.topLevelItemCount():
+                self.vault.tree.setCurrentItem(self.vault.tree.topLevelItem(0))
+            return True
+        if k == Qt.Key_Left and self.side == 1:                # 보관함 → 최근 (펼쳐진 묶음 위에서는 접기 우선)
+            it = self.vault.tree.currentItem()
+            if it is None or not (it.data(0, Qt.UserRole + 1) in ("folder", "group") and it.isExpanded()):
+                self.set_side(0)
+                return True
+        return self.cur().handle_key(e)
 
 
 # ───────────────────────── 창 조절 버튼 아이콘 (폰트 글자에 의존하지 않고 직접 그림) ─────────────────────────
@@ -1953,12 +2094,12 @@ class Main(QWidget):
         self.hide_btn.setCheckable(True)
         self.hide_btn.setChecked(self.settings.get("hide_on_launch", False))
         self.hide_btn.toggled.connect(self.on_hide_toggle)
+        self.recent_vault = RecentVaultPage(self.recent, self.vault)
         self.settings_page = SettingsPage(self)
         self.settings_page.toast.connect(self.say)
         self.search_page = SearchPage(self)
-        self.pages = [("런처", "런처", self.launcher), ("최근", "최근 항목", self.recent),
-                      ("보관함", "고정 보관함", self.vault), ("검색", "검색  ·  파일 / 앱", self.search_page),
-                      ("설정", "설정", self.settings_page)]
+        self.pages = [("런처", "런처", self.launcher), ("최근 · 보관함", "최근 항목  ·  보관함", self.recent_vault),
+                      ("검색", "검색  ·  파일 / 앱", self.search_page), ("설정", "설정", self.settings_page)]
         for i, (label, _t, page) in enumerate(self.pages):
             b = QPushButton(label)
             b.setObjectName("nav")
@@ -1987,7 +2128,7 @@ class Main(QWidget):
 
         # 하단
         foot = QHBoxLayout()
-        hint = QLabel("↑↓←→ 이동   Enter 실행   Space 그룹 열기/닫기   Ctrl+F 검색↔목록 (Tab)   드래그로 이동·묶기   Ctrl+1~5 탭   F11 전체화면   Esc 닫기")
+        hint = QLabel("↑↓←→ 이동   Enter 실행   Space 그룹 열기/닫기   ←→ 최근↔보관함   Ctrl+F 검색↔목록 (Tab)   드래그로 이동·묶기   Ctrl+1~4 탭   F11 전체화면   Esc 닫기")
         hint.setObjectName("hint")
         self.toast_lbl = QLabel()
         self.toast_lbl.setObjectName("toast")
@@ -2067,15 +2208,15 @@ class Main(QWidget):
             size_btns.append(b)
         self.action_sets = [
             size_btns + [btn("＋ 앱 추가", self.launcher.add_app), btn("＋ 카테고리", self.launcher.add_category)],
-            [btn("새로고침", self.recent.refresh)],
         ]
         sort = QComboBox()
         sort.setFocusPolicy(Qt.NoFocus)
+        sort.setToolTip("보관함 보기 방식")
         sort.addItems(SORTS)
         sort.setCurrentText(self.vault.sort)
         sort.currentTextChanged.connect(self.vault.set_sort)
-        self.action_sets.append([sort, btn("＋ 폴더", self.vault.add_folder),
-                                 btn("＋ 파일", self.vault.add_files)])
+        self.action_sets.append([btn("새로고침", self.recent.refresh), sort, btn("＋ 파일 핀", self.vault.add_files),
+                                 btn("＋ 폴더 핀", self.vault.add_dir)])
         self.action_sets.append([])          # 검색 탭
         self.action_sets.append([])          # 설정 탭
         for s in self.action_sets:
@@ -2144,7 +2285,7 @@ class Main(QWidget):
                 w.setVisible(k == i)
         if i == 1:
             self.recent.refresh()
-        elif i == 4:
+        elif i == 3:
             self.settings_page.refresh()
         self.on_search(self.search.text())
 
@@ -2159,8 +2300,10 @@ class Main(QWidget):
         save_json(SETTINGS_FILE, self.settings)
 
     def pin(self, item):
-        self.vault.pin_item(item)
-        self.say(f"보관함에 고정: {item['name']}")
+        if self.vault.pin_item(item):
+            self.say(f"핀 꽂기: {item['name']}")
+        else:
+            self.say(f"이미 보관함에 있습니다: {item['name']}")
 
     def tick(self):
         self.clock.setText(time.strftime("%p %I:%M").replace("AM", "오전").replace("PM", "오후"))
@@ -2295,7 +2438,7 @@ class Main(QWidget):
                 self.hide()
         elif k == Qt.Key_F11:
             self.toggle_fullscreen()
-        elif mods & Qt.ControlModifier and Qt.Key_1 <= k <= Qt.Key_5:
+        elif mods & Qt.ControlModifier and Qt.Key_1 <= k <= Qt.Key_4:
             self.goto(k - Qt.Key_1)
         elif mods & Qt.ControlModifier and k == Qt.Key_F:      # Ctrl+F: 검색 ↔ 목록 왕복
             if self.search.hasFocus():
