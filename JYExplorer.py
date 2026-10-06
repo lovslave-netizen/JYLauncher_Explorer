@@ -316,6 +316,7 @@ class FileView(QTreeView):
         super().__init__()
         self.pinned = False
         self._edit_closed = 0.0
+        self._mt = None                                 # 폴더 수정 시각(밖에서 파일이 생기거나 지워졌는지 확인용)
         self.search_page = None                    # '검색' 탭이면 화면에 보이는 SearchTabPage
         self.suspended_search = None               # 검색 결과에서 폴더로 들어간 상태: 잠시 숨겨 둔 검색 화면 (◀ 로 돌아옴)
         self.hist, self.hi = [], -1
@@ -408,6 +409,7 @@ class FileView(QTreeView):
             self._applying = False
         else:
             self._sort = (col, order)
+            QTimer.singleShot(0, self.refresh_if_changed)      # 정렬을 바꿀 때 밖에서 바뀐 내용이 있으면 새로 읽음
 
     def _header_menu(self, pos):
         m = QMenu(self)
@@ -450,12 +452,24 @@ class FileView(QTreeView):
         if FileView.on_cols_changed:
             FileView.on_cols_changed(apply_others)
 
+    def _stamp(self):
+        try:
+            return os.stat(self.path).st_mtime_ns if self.path else None
+        except OSError:
+            return None
+
+    def refresh_if_changed(self):
+        """다른 프로그램(브라우저 다운로드 등)이 폴더를 바꿨으면 다시 읽음 — 창으로 돌아올 때, 정렬을 바꿀 때 호출"""
+        if self.path and self.search_page is None and self._stamp() != self._mt:
+            self.refresh()
+
     def refresh(self):
         """폴더를 다시 읽음. QFileSystemModel 은 네트워크 드라이브/대량 작업/USB 에서 변경을 놓치는 일이 있어서
         모델을 새로 만들어 갈아 끼움 (선택 항목·스크롤·정렬·열 설정은 유지)"""
         if getattr(self, "_refreshing", False):
             return
         self._refreshing = True
+        self._mt = self._stamp()
         sel = self.selected_paths()
         cur = self.model_.filePath(self.currentIndex()) if self.currentIndex().isValid() else ""
         sb = self.verticalScrollBar().value()
@@ -506,6 +520,7 @@ class FileView(QTreeView):
                 self.hist.append(path)
             self.hi = len(self.hist) - 1
         self.clearSelection()
+        self._mt = self._stamp()
         self.pathChanged.emit(path)
         return True
 
@@ -571,6 +586,7 @@ class FileView(QTreeView):
             self.selectionModel().select(idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
             self.scrollTo(idx)
             if rename:
+                self.setFocus()                      # 포커스가 없으면 이름 입력칸이 열리자마자 닫혀서, 따로 클릭해야 했음
                 self.edit(idx)
             return True
         return False
@@ -2783,12 +2799,22 @@ class Main(QMainWindow):
         self._drive_t = QTimer(self)                      # 드라이브 문자 목록(비트마스크)만 비교: 3초마다 시스템 호출 1번이라 부담 없음
         self._drive_t.timeout.connect(self._check_drives)
         self._drive_t.start(3000)
+        QGuiApplication.instance().applicationStateChanged.connect(self._app_state)
         self.rebuild_side()
         self._restoring = True                  # 세션 복원으로 열린 탭은 '최근/자주 가는 곳' 방문으로 세지 않음
         self.restore_session()
         self._restoring = False
         self.update_toolbar_star()
         QTimer.singleShot(4000, lambda: self.run_sync("시작"))        # 켜져 있으면 시작할 때 한 번 맞춤
+
+    def _app_state(self, st):
+        """다른 프로그램(다운로드 등)을 쓰다 돌아오면 보이는 폴더들이 바뀌었는지 확인해서 새로 읽음"""
+        if st != Qt.ApplicationActive:
+            return
+        for p in self.visible_panes():
+            v = p.view()
+            if v is not None:
+                v.refresh_if_changed()
 
     # ---- 구성 보조 ----
     def _sect(self, text):

@@ -986,8 +986,18 @@ def forward_tree_key(tree, e):
     return False
 
 
+def lnk_target(p):
+    """바로가기(.lnk)가 가리키는 실제 파일/폴더 경로 (읽지 못하면 빈 문자열)"""
+    try:
+        import win32com.client
+        return win32com.client.Dispatch("WScript.Shell").CreateShortCut(str(p)).TargetPath or ""
+    except Exception:
+        return ""
+
+
 class RecentPage(QWidget):
     activated = Signal(str)
+    pinRequested = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -997,8 +1007,28 @@ class RecentPage(QWidget):
         self.tree = make_tree()
         self.tree.setColumnWidth(0, 520)
         self.tree.itemClicked.connect(lambda it, _c: self.activated.emit(it.data(0, Qt.UserRole)))
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.menu)
         lay.addWidget(self.tree)
         self.entries = []
+
+    def menu(self, pos):
+        it = self.tree.itemAt(pos)
+        if it is None:
+            return
+        self.tree.setCurrentItem(it)
+        lnk = it.data(0, Qt.UserRole)
+        m = QMenu(self)
+        m.addAction("열기", lambda: self.activated.emit(lnk))
+        m.addAction("보관함에 고정", lambda: self.pin_lnk(lnk, it.text(0)))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def pin_lnk(self, lnk, name):
+        target = lnk_target(lnk)
+        if not target or not os.path.exists(target):
+            QMessageBox.information(self, "보관함에 고정", "이 항목이 가리키는 파일/폴더를 찾을 수 없어 고정하지 못했습니다.")
+            return
+        self.pinRequested.emit({"path": target, "name": os.path.basename(target.rstrip("\\/")) or name})
 
     def refresh(self):
         try:
@@ -1949,6 +1979,7 @@ class Main(QWidget):
         for p in (self.launcher, self.recent, self.vault):
             p.activated.connect(self.launch)
         self.launcher.pinRequested.connect(self.pin)
+        self.recent.pinRequested.connect(self.pin)
         self.build_actions()
         self.goto(0)
 
