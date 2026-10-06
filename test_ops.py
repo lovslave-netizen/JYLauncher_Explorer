@@ -337,6 +337,26 @@ def main():
     assert lw.vault.tree.topLevelItemCount() == 1
     print("recent+vault page OK", flush=True)
 
+    # 10) 런처에서 그냥 입력 → 검색 탭: 앱(런처 등록 앱) 목록 + 파일·폴더 목록, 지우면 원래 탭으로
+    exe = os.path.join(td, "dbtw.exe")
+    open(exe, "w").write("x")
+    lw.launcher.data.setdefault("업무", []).append({"type": "app", "name": "DBT 12.4", "path": exe})
+    lw.search_page.apps = []                       # 시작 메뉴 색인(PowerShell)은 이 테스트에서 생략
+    lw.search_page._guard_done, lw.search_page._use_everything = True, False
+    lw.goto(0)
+    lw.search.setText("dbt")
+    assert lw.index == 2, lw.index
+    names = [lw.search_page.app_list.topLevelItem(i).text(0) for i in range(lw.search_page.app_list.topLevelItemCount())]
+    assert names == ["DBT 12.4"], names
+    assert lw.search_page.active == "apps"
+    lw.search.setText("")
+    assert lw.index == 0, lw.index
+    lw.goto(2)
+    lw.search.setText("dbt")
+    lw.search.setText("")
+    assert lw.index == 2                           # 직접 들어간 검색 탭은 그대로 둠
+    print("launcher unified search OK", flush=True)
+
 
 try:
     main()

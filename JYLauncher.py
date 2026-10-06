@@ -1631,49 +1631,50 @@ class SearchPage(QWidget):
         opts.addWidget(self.ev_btn)
         lay.addLayout(opts)
 
-        self.status = QLabel("맨 위 검색창에 검색어를 입력하세요  (파일 이름 / 앱 이름).  확장자 버튼으로 xlsx, hwp 같은 파일만 찾을 수도 있습니다")
+        self.status = QLabel("맨 위 검색창에 검색어를 입력하세요  (앱 이름 / 파일 이름).  확장자 버튼으로 xlsx, hwp 같은 파일만 찾을 수도 있습니다")
         self.status.setObjectName("dim")
         lay.addWidget(self.status)
 
         body = QHBoxLayout()
         body.setSpacing(14)
-        # 앱 검색 (접힘/펼침)
-        self.app_panel = QFrame()
-        self.app_panel.setObjectName("sidebar")
+        # 앱 (왼쪽): 런처에 등록한 앱 + 시작 메뉴 앱.  파일 · 폴더 (오른쪽): Everything 검색 결과
+        self.app_panel = QWidget()
         al = QVBoxLayout(self.app_panel)
-        al.setContentsMargins(10, 10, 10, 10)
-        al.setSpacing(8)
-        self.app_btn = QPushButton("앱 검색  (펼치기)")
-        self.app_btn.setObjectName("chip")
-        self.app_btn.setCheckable(True)
-        self.app_btn.setFocusPolicy(Qt.NoFocus)
-        self.app_btn.setToolTip("시작 메뉴에서 검색되는 앱을 찾아 실행합니다. 펼칠 때 처음 한 번 목록을 만듭니다")
-        self.app_btn.toggled.connect(self._toggle_apps)
-        al.addWidget(self.app_btn)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(6)
+        self.app_head = QLabel("앱")
+        self.app_head.setObjectName("rvhead")
+        al.addWidget(self.app_head)
         self.app_note = QLabel("")
         self.app_note.setObjectName("dim")
         self.app_note.setWordWrap(True)
-        self.app_note.hide()
         al.addWidget(self.app_note)
         self.app_list = make_tree()
         self.app_list.setColumnCount(1)
-        self.app_list.hide()
         self.app_list.itemActivated.connect(self._launch_app_item)
         self.app_list.itemClicked.connect(self._launch_app_item)
         al.addWidget(self.app_list, 1)
-        al.addStretch(0)
-        self.app_panel.setFixedWidth(200)
+        self.app_panel.setFixedWidth(340)
         body.addWidget(self.app_panel)
-        # 파일 검색 결과
+        fbox = QWidget()
+        fl = QVBoxLayout(fbox)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(6)
+        self.file_head = QLabel("파일 · 폴더")
+        self.file_head.setObjectName("rvhead")
+        fl.addWidget(self.file_head)
         self.tree = SUI.ResultsTree()
         self.tree.openRequested.connect(self.open_result)
         self.tree.menuRequested.connect(self._result_menu)
-        body.addWidget(self.tree, 1)
+        fl.addWidget(self.tree, 1)
+        body.addWidget(fbox, 1)
+        self._mark_active()
         lay.addLayout(body, 1)
 
     # ---- 입력 ----
     def set_filter(self, text):
         self.text = text
+        self._refresh_apps()                  # 앱은 입력하는 즉시 (가벼움), 파일 검색은 잠깐 뒤에
         self._timer.start()
 
     def selected_exts(self):
@@ -1759,7 +1760,7 @@ class SearchPage(QWidget):
             return
         n = self.tree.topLevelItemCount()
         how = {"everything": "Everything (빠름)", "scan": "직접 검색 (느림 — Everything 을 설치하면 즉시 검색)"}.get(info.get("backend"), "")
-        msg = f"파일 {n:,}개" + (f"  ·  {how}" if how else "")
+        msg = f"파일 · 폴더 {n:,}개" + (f"  ·  {how}" if how else "")
         if info.get("truncated"):
             msg += "  ·  결과가 많아 일부만 표시 (검색어를 더 구체적으로)"
         if info.get("note"):
@@ -1770,30 +1771,36 @@ class SearchPage(QWidget):
             msg += "  ·  결과 없음"
         self.status.setText(msg)
 
-    # ---- 앱 검색 ----
-    def _toggle_apps(self, on):
-        self.app_btn.setText("앱 검색  (접기)" if on else "앱 검색  (펼치기)")
-        self.app_panel.setFixedWidth(400 if on else 200)
-        self.app_list.setVisible(on)
-        self.app_note.setVisible(on and self.apps is None)
-        if on:
-            self.active = "apps"
-            self._refresh_apps()
-        else:
-            self.active = "files"
+    # ---- 앱 검색 (런처에 등록한 앱 먼저, 그다음 시작 메뉴 앱) ----
+    def prebuild(self):
+        """시작 메뉴 앱 목록을 백그라운드로 미리 만들어 둠 (처음 검색할 때 기다리지 않도록)"""
+        if self.apps is None and not self.indexing:
+            self.indexing = True
+            threading.Thread(target=lambda: self._apps_ready.emit(appsearch.build_index()), daemon=True).start()
+
+    def _launcher_apps(self):
+        words = self.text.lower().split()
+        if not words:
+            return []
+        out = []
+        for cat, items in self.main.launcher.data.items():
+            for i in flat_apps(items):
+                nm = i["name"].lower()
+                if all(w in nm for w in words):
+                    out.append({"name": i["name"], "target": i["path"], "kind": "lnk", "folder": "런처 · " + cat})
+        out.sort(key=lambda a: (not a["name"].lower().startswith(words[0]), a["name"].lower()))
+        return out
 
     def _refresh_apps(self):
-        if not self.app_btn.isChecked():
-            return
-        if self.apps is None:
-            if not self.indexing:
-                self.indexing = True
-                self.app_note.setText("앱 목록을 만드는 중…")
-                self.app_note.show()
-                threading.Thread(target=lambda: self._apps_ready.emit(appsearch.build_index()), daemon=True).start()
-            return
+        text = self.text.strip()
+        if text:
+            self.prebuild()
+        hits = self._launcher_apps()
+        have = {a["name"].lower() for a in hits}
+        if self.apps is not None:
+            hits += [a for a in appsearch.filter_apps(self.apps, self.text) if a["name"].lower() not in have]
+        hits = hits[:80]
         self.app_list.clear()
-        hits = appsearch.filter_apps(self.apps, self.text)[:80]
         for a in hits:
             it = QTreeWidgetItem([a["name"]])
             it.setData(0, Qt.UserRole, a)
@@ -1802,8 +1809,22 @@ class SearchPage(QWidget):
             self.app_list.addTopLevelItem(it)
         if hits:
             self.app_list.setCurrentItem(self.app_list.topLevelItem(0))
-        self.app_note.setText(f"{len(hits)}개" if self.text.strip() else f"앱 {len(self.apps)}개 — 위 검색창에 이름을 입력하세요")
-        self.app_note.setVisible(True)
+        self.app_head.setText(f"앱  ({len(hits)})" if text else "앱")
+        if not text:
+            self.app_note.setText("앱 이름을 입력하세요")
+        elif self.apps is None:
+            self.app_note.setText("시작 메뉴 앱 목록을 만드는 중…")
+        else:
+            self.app_note.setText("" if hits else "일치하는 앱이 없습니다")
+        self.app_note.setVisible(bool(self.app_note.text()))
+        self.active = "apps" if hits else "files"
+        self._mark_active()
+
+    def _mark_active(self):
+        for h, on in ((self.app_head, self.active == "apps"), (self.file_head, self.active != "apps")):
+            if h.property("on") != on:
+                h.setProperty("on", on)
+                _repolish(h)
 
     def _on_apps_ready(self, apps):
         self.apps = apps
@@ -1844,15 +1865,17 @@ class SearchPage(QWidget):
 
     # ---- 키 (런처 공통 키 처리에서 넘어옴) ----
     def current_tree(self):
-        return self.app_list if (self.active == "apps" and self.app_btn.isChecked()) else self.tree
+        return self.app_list if self.active == "apps" else self.tree
 
     def handle_key(self, e):
         k = e.key()
-        if k == Qt.Key_Left and self.app_btn.isChecked():
+        if k == Qt.Key_Left and self.app_list.topLevelItemCount():
             self.active = "apps"
+            self._mark_active()
             return True
         if k == Qt.Key_Right:
             self.active = "files"
+            self._mark_active()
             return True
         t = self.current_tree()
         if forward_tree_key(t, e):
@@ -2144,6 +2167,7 @@ class Main(QWidget):
         self.recent.addRequested.connect(lambda p: (add_item_to_launcher(p), self.reload_launcher(), self.say('런처에 추가했습니다')))
         self.build_actions()
         self.goto(0)
+        QTimer.singleShot(3000, self.search_page.prebuild)       # 시작 메뉴 앱 목록 미리 만들기
 
         t = QTimer(self)
         t.timeout.connect(self.tick)
@@ -2273,7 +2297,10 @@ class Main(QWidget):
             return False
         return True
 
+    _auto_from = None
+
     def goto(self, i):
+        self._auto_from = None
         if self._hdr >= 0:
             self.set_header(-1)
         self.index = i
@@ -2293,6 +2320,16 @@ class Main(QWidget):
         return self.pages[self.index][2]
 
     def on_search(self, text):
+        t = text.strip()
+        if t and self.index in (0, 1):               # 런처/최근 탭에서 입력 → 검색 탭 (앱 + 파일·폴더)
+            prev = self.index
+            self.goto(2)
+            self._auto_from = prev
+            return
+        if not t and self._auto_from is not None and self.index == 2:      # 검색어를 지우면 원래 보던 탭으로
+            back = self._auto_from
+            self.goto(back)
+            return
         self.page().set_filter(text)
 
     def on_hide_toggle(self, v):

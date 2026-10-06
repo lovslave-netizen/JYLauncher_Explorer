@@ -121,7 +121,6 @@ def main():
     lw.goto(2)
     lw.search.setText("report")
     wait_for(lambda: sp.tree.topLevelItemCount() == 1, "런처 파일 검색 결과 1개 (하나는 위에서 이름을 바꿨음)")
-    sp.app_btn.setChecked(True)
     wait_for(lambda: sp.apps is not None, "앱 색인 생성 (PowerShell Get-StartApps)", timeout=90)
     print("launcher smoke OK", flush=True)
 
