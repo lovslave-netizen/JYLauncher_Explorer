@@ -998,6 +998,7 @@ def lnk_target(p):
 class RecentPage(QWidget):
     activated = Signal(str)
     pinRequested = Signal(dict)
+    addRequested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -1018,15 +1019,34 @@ class RecentPage(QWidget):
             return
         self.tree.setCurrentItem(it)
         lnk = it.data(0, Qt.UserRole)
+        target = self.target_of(lnk)
         m = QMenu(self)
         m.addAction("열기", lambda: self.activated.emit(lnk))
-        m.addAction("보관함에 고정", lambda: self.pin_lnk(lnk, it.text(0)))
+        a = m.addAction("폴더 위치 열기 (JY Explorer)", lambda: open_in_explorer(target if os.path.isdir(target) else os.path.dirname(target)))
+        b = m.addAction("파일 위치 열기 (Windows 탐색기에서 선택)", lambda: reveal(target))
+        c = m.addAction("경로 복사", lambda: QApplication.clipboard().setText(os.path.normpath(target)))
+        d = m.addAction("보관함에 고정", lambda: self.pin_lnk(lnk, it.text(0)))
+        e = m.addAction("런처에 추가", lambda: self.addRequested.emit(target))
+        for act in (a, b, c, d, e):
+            act.setEnabled(bool(target))                  # 가리키는 대상이 없어진 항목은 열기/지우기만
+        m.addSeparator()
+        m.addAction("최근 목록에서 지우기", lambda: self.forget(lnk))
         m.exec(self.tree.viewport().mapToGlobal(pos))
 
+    def target_of(self, lnk):
+        t = lnk_target(lnk)
+        return t if t and os.path.exists(t) else ""
+
+    def forget(self, lnk):
+        try:
+            os.remove(lnk)                                # Windows '최근 항목' 바로가기만 지움 (원본 파일은 그대로)
+        except OSError:
+            pass
+        self.refresh()
+
     def pin_lnk(self, lnk, name):
-        target = lnk_target(lnk)
-        if not target or not os.path.exists(target):
-            QMessageBox.information(self, "보관함에 고정", "이 항목이 가리키는 파일/폴더를 찾을 수 없어 고정하지 못했습니다.")
+        target = self.target_of(lnk)
+        if not target:
             return
         self.pinRequested.emit({"path": target, "name": os.path.basename(target.rstrip("\\/")) or name})
 
@@ -1980,6 +2000,7 @@ class Main(QWidget):
             p.activated.connect(self.launch)
         self.launcher.pinRequested.connect(self.pin)
         self.recent.pinRequested.connect(self.pin)
+        self.recent.addRequested.connect(lambda p: (add_item_to_launcher(p), self.reload_launcher(), self.say('런처에 추가했습니다')))
         self.build_actions()
         self.goto(0)
 
