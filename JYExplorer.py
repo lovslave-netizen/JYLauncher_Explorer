@@ -2424,11 +2424,16 @@ class JobRunner(QObject):
             def cb(d, t, n, job=job):
                 self.progress.emit(d, t, n)
                 self.detail.emit(job.snapshot(), job.files_done, job.total_files)
+            t0 = time.monotonic()
             ok = job.run(cb)
+            elapsed = time.monotonic() - t0
             self.current = None
             dirs = [job.dest_dir] + [os.path.dirname(x.rstrip("\\/")) for x in job.sources]
             self.touched.emit([d for d in dirs if d])
             summary = f"{label} {'완료' if ok else '취소됨'} · 파일 {job.files_done:,}개"
+            if job.op != "delete" and elapsed >= 2 and job.done_bytes > 0:      # 끝난 뒤에도 평균 속도/걸린 시간을 남김
+                m, s = divmod(int(elapsed), 60)
+                summary += f" · 평균 {fmt_size(job.done_bytes / elapsed)}/초 ({m}:{s:02d})"
             self.finished.emit(summary, job.errors, ok)
             self.queueChanged.emit(len(self.queue))
 
@@ -3472,16 +3477,47 @@ class Main(QMainWindow):
 
     # ---- 작업 진행 ----
     def on_job_started(self, label):
-        self.job_label.setText(label)
+        # 파일 목록/크기를 읽는 준비 단계 동안에는 막대를 '진행 중'(좌우로 움직임)으로 두고 글로 현재 상황을 보여 줌
+        self._job_verb = label.rstrip("…").replace(" 중", "")
+        self.job_label.setText(f"{self._job_verb} 준비 중…")
+        self.job_label.setStyleSheet("")
+        self.job_bar.setRange(0, 0)
+        self._spd = None
         for w in (self.job_label, self.job_bar, self.cancel_btn):
             w.show()
 
     def on_progress(self, done, total, name):
-        self.job_bar.setValue(int(done * 100 / max(total, 1)))
         job = self.runner.current
         by_count = job is not None and getattr(job, "unit", "bytes") == "count"
+        if total <= 0:                                   # 준비 단계: 아직 전체 크기를 모름
+            self.job_bar.setRange(0, 0)
+            self.job_label.setText(f"{getattr(self, '_job_verb', '작업')} 준비 · {name}" if name else self.job_label.text())
+            return
+        if self.job_bar.maximum() == 0:                  # 준비 끝, 첫 진행값이 오면 일반 막대로
+            self.job_bar.setRange(0, 100)
+        self.job_bar.setValue(int(done * 100 / max(total, 1)))
         amount = f"{done:,} / {total:,}개" if by_count else f"{fmt_size(done)} / {fmt_size(total)}"
-        self.job_label.setText(f"{name[:40]}   {amount}" if name else self.job_label.text())
+        # 전송 속도(1초 단위로 재서 부드럽게)와 '얼마나 오래 변화가 없는지' — 멈춘 건지 확인할 수 있게
+        now = time.monotonic()
+        st = getattr(self, "_spd", None)
+        if st is None or st["job"] is not job or done < st["last"]:
+            st = self._spd = {"job": job, "t": now, "d": done, "last": done, "move": now, "v": 0.0}
+        if done > st["last"]:
+            st["last"], st["move"] = done, now
+        if now - st["t"] >= 1.0:
+            inst = (done - st["d"]) / (now - st["t"])
+            st["v"] = inst if not st["v"] else st["v"] * 0.6 + inst * 0.4
+            st["t"], st["d"] = now, done
+        idle = now - st["move"]
+        extra = ""
+        if not by_count and done < total:
+            if st["v"] > 0:
+                eta = int((total - done) / st["v"])
+                extra = f"   {fmt_size(st['v'])}/초   남은 시간 {eta // 3600}:{eta % 3600 // 60:02d}:{eta % 60:02d}"
+            if idle >= 3:
+                extra += f"   ! {int(idle)}초째 변화 없음 (디스크 기록 대기 중일 수 있음)"
+        self.job_label.setStyleSheet("color:#ffb454;" if idle >= 3 and done < total else "")
+        self.job_label.setText(f"{name[:40]}   {amount}{extra}" if name else self.job_label.text())
 
     def on_job_detail(self, active, done, total):
         rows = sorted(active, key=lambda a: -a[2])[:6]

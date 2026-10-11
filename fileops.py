@@ -252,11 +252,14 @@ class Job:
                     moves_whole.append((src, dst))  # 폴더 통째로 이름만 바꿔 이동 (즉시)
                     continue
                 for root, dnames, fnames in os.walk(src):
+                    if self.cancel.is_set():
+                        raise Cancelled()
                     rel = os.path.relpath(root, src)
                     droot = dst if rel == "." else os.path.join(dst, rel)
                     dirs.append(droot)
                     for f in fnames:
                         files.append((os.path.join(root, f), os.path.join(droot, f)))
+                    self.current = f"파일 목록 확인 중… {len(files):,}개"      # 큰 폴더는 여기서 오래 걸려서 진행을 보여 줌
             else:
                 files.append((src, dst))
         return files, dirs, moves_whole
@@ -326,15 +329,6 @@ class Job:
         """progress(done_bytes, total_bytes, current_name) 는 다른 스레드에서 호출될 수 있음"""
         if self.op == "delete":
             return self._run_delete(progress)
-        files, dirs, moves_whole = self._plan()
-        sizes = {}
-        for s, _ in files:
-            try:
-                sizes[s] = os.path.getsize(s)
-            except OSError:
-                sizes[s] = 0
-        self.total_bytes = sum(sizes.values()) or 1
-        self.total_files = len(files)
         stop = threading.Event()
 
         def ticker():
@@ -345,9 +339,25 @@ class Job:
                     except Exception:               # 화면 쪽 오류 때문에 진행 표시가 멈추지 않게
                         pass
 
+        # 진행 알림은 목록/크기를 읽는 준비 단계부터 시작 (total_bytes 가 0 인 동안이 '준비 중' → 화면에 현재 상황을 글로 보여 줌)
         t = threading.Thread(target=ticker, daemon=True)
         t.start()
         try:
+            self.current = "파일 목록 확인 중…"
+            files, dirs, moves_whole = self._plan()
+            sizes = {}
+            for i, (s, _) in enumerate(files):
+                if i % 100 == 0:
+                    if self.cancel.is_set():
+                        raise Cancelled()
+                    self.current = f"파일 크기 확인 중… {i:,} / {len(files):,}개"
+                try:
+                    sizes[s] = os.path.getsize(s)
+                except OSError:
+                    sizes[s] = 0
+            self.total_bytes = sum(sizes.values()) or 1
+            self.total_files = len(files)
+            self.current = ""
             for src, dst in moves_whole:
                 self.current = os.path.basename(src)
                 try:
