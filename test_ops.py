@@ -373,4 +373,9 @@ except Exception:
     code = 1
 sys.stdout.flush()
 sys.stderr.flush()
+import ctypes
+_k = ctypes.WinDLL("kernel32")
+_k.GetCurrentProcess.restype = ctypes.c_void_p
+_k.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_k.TerminateProcess(_k.GetCurrentProcess(), code)   # os._exit 는 종료 중 DLL 정리에서 CI 접근 위반이 날 수 있어 프로세스를 바로 끝냄
 os._exit(code)

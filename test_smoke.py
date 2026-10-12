@@ -133,4 +133,10 @@ except Exception:
     code = 1
 sys.stdout.flush()
 sys.stderr.flush()
-os._exit(code)          # 종료 시 백그라운드 스레드(검색/앱 색인)와 Qt 객체 파괴 순서 때문에 나는 접근 위반을 피하려고 바로 종료
+import ctypes
+_k = ctypes.WinDLL("kernel32")
+_k.GetCurrentProcess.restype = ctypes.c_void_p
+_k.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_k.TerminateProcess(_k.GetCurrentProcess(), code)   # os._exit 는 종료 중 DLL 정리에서 CI 접근 위반이 날 수 있어 프로세스를 바로 끝냄
+os._exit(code)
+# 종료 시 백그라운드 스레드(검색/앱 색인)와 Qt 객체 파괴 순서 때문에 나는 접근 위반을 피하려고 바로 종료
