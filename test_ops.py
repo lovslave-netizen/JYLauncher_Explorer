@@ -355,6 +355,12 @@ def main():
     lw.search.setText("dbt")
     lw.search.setText("")
     assert lw.index == 2                           # 직접 들어간 검색 탭은 그대로 둠
+    sp = lw.search_page
+    sp._timer.stop()
+    sp.searcher.cancel()                           # 검색 스레드가 남은 채 프로세스가 끝나면 CI 에서 접근 위반으로 종료됨
+    for _ in range(20):
+        pump()
+        time.sleep(0.05)
     print("launcher unified search OK", flush=True)
 
 
