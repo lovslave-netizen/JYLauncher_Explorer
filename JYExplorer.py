@@ -237,6 +237,30 @@ def media_cache():
     return _media
 
 
+def rename_failure_reason(old, new_name):
+    """이름 바꾸기가 실패한 이유를 사람이 읽을 말로 (실제로 한 번 시도해서 Windows 오류를 얻음)"""
+    head = f"'{os.path.basename(old)}' → '{new_name}'\n\n"
+    if any(c in new_name for c in '\\/:*?"<>|'):
+        return head + '이름에는 \\ / : * ? " < > | 문자를 쓸 수 없습니다.'
+    new = os.path.join(os.path.dirname(old), new_name)
+    if os.path.normcase(new) != os.path.normcase(old) and os.path.exists(new):
+        return head + "같은 이름의 파일/폴더가 이미 있습니다."
+    if new_name.endswith((" ", ".")):
+        return head + "이름은 공백이나 마침표로 끝날 수 없습니다."
+    try:
+        os.rename(old, new)
+        return head + "다시 시도하니 이름이 바뀌었습니다. 목록을 새로고침(Ctrl+R)해 보세요."
+    except OSError as e:
+        code = getattr(e, "winerror", None)
+        why = {32: "다른 프로그램이 이 파일(또는 이 폴더 안의 파일)을 사용 중입니다.\n열려 있는 프로그램(문서 편집기, 미리보기, 탐색기 창 등)을 닫고 다시 시도하세요.",
+               5: "접근이 거부되었습니다.\n· 폴더라면: 그 안의 파일을 다른 프로그램이 열어 두고 있을 가능성이 큽니다 (열려 있는 문서/미리보기/다른 탐색기 창을 닫아 보세요).\n· 그 외: 읽기 전용이거나 권한이 없는 위치입니다 (관리자 권한이 필요할 수 있습니다).",
+               3: "경로를 찾을 수 없습니다. 파일이 이미 이동/삭제되었을 수 있습니다.",
+               183: "같은 이름이 이미 있습니다.",
+               206: "경로가 너무 깁니다.",
+               123: "이름에 사용할 수 없는 글자가 있습니다."}.get(code)
+        return head + (why or "") + f"\n\n(Windows 오류 {code}: {e.strerror})"
+
+
 class FSModel(QFileSystemModel):
     """기본 4열(이름/크기/확장자/수정한 날짜) + 동영상·음악 정보 열(길이, 해상도, 코덱, 비트레이트 …).
     추가 열은 화면에 보일 때만 값을 요청하고, 정보는 백그라운드에서 읽어 채운다."""
@@ -258,6 +282,20 @@ class FSModel(QFileSystemModel):
             if section < self.N_TOTAL:
                 return MI.COLUMNS[section - self.N_BASE][1]
         return super().headerData(section, orientation, role)
+
+    def setData(self, index, value, role=Qt.EditRole):
+        """이름 바꾸기: Qt 기본 모델은 실패해도 아무 말 없이 원래 이름으로 되돌리므로, 실패하면 이유를 알려 줌"""
+        if role != Qt.EditRole or index.column() != 0:
+            return super().setData(index, value, role)
+        old = self.filePath(index)
+        new_name = str(value).strip()
+        if not new_name or new_name == os.path.basename(old):
+            return super().setData(index, value, role)
+        ok = super().setData(index, value, role)
+        if not ok:
+            QTimer.singleShot(0, lambda: QMessageBox.warning(QApplication.activeWindow(), "이름을 바꾸지 못했습니다",
+                                                           rename_failure_reason(old, new_name)))
+        return ok
 
     def data(self, index, role=Qt.DisplayRole):
         c = index.column()
