@@ -341,7 +341,7 @@ def main():
     exe = os.path.join(td, "dbtw.exe")
     open(exe, "w").write("x")
     lw.launcher.data.setdefault("업무", []).append({"type": "app", "name": "DBT 12.4", "path": exe})
-    lw.search_page.apps = []                       # 시작 메뉴 색인(PowerShell)은 이 테스트에서 생략
+    lw.search_page.apps, lw.search_page.indexing = [], True        # 시작 메뉴 색인(PowerShell 스레드)은 이 테스트에서 생략
     lw.search_page._guard_done, lw.search_page._use_everything = True, False
     lw.goto(0)
     lw.search.setText("dbt")
