@@ -14,7 +14,8 @@ from pathlib import Path
 import ctypes
 from ctypes import wintypes
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QFileInfo, QMimeData, QObject, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (QAbstractNativeEventFilter, QFileInfo, QMimeData, QObject, QPointF, QSize, Qt, QTimer, QUrl,
+                            Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QDrag, QFont, QFontDatabase, QIcon, QKeyEvent, QPainter, QPen,
                            QPixmap)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import QSystemTrayIcon
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFileDialog, QMessageBox,
     QFileIconProvider, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMenu, QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QSplitter, QStackedWidget,
+    QKeySequenceEdit, QLineEdit, QMenu, QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QSplitter, QStackedWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -30,6 +31,7 @@ from jycommon import (DATA_DIR, FONT_FAMILY, FROZEN, INSTANCE_SUFFIX, LAUNCHER_F
                       add_item_to_launcher, app_icon, create_app_shortcuts, file_mtime, pick_category, load_font, load_json, save_json)
 import appsearch
 import filesearch as FS
+import hotkeys as HK
 import search_ui as SUI
 from jycommon import open_in_explorer
 from updater import Updater
@@ -265,6 +267,9 @@ class Card(QFrame):
             star = QLabel("★", self)
             star.setStyleSheet(f"color:#ffd166; font-size:{14 if SHOW_NAME else 9}px; background:transparent;")
             star.move(CARD_W - (22 if SHOW_NAME else 13), 5 if SHOW_NAME else 1)
+        if item.get("hotkey") and not folder:
+            tip = f"단축키: {item['hotkey']}"
+            self.setToolTip(f"{self.toolTip()}\n{tip}" if self.toolTip() else tip)
         self.setProperty("sel", False)
         self.setProperty("drop", "")
 
@@ -507,6 +512,7 @@ class LauncherPage(QScrollArea):
     activated = Signal(str)
     pinRequested = Signal(dict)
     toast = Signal(str)
+    saved = Signal()                                 # 저장됨 (항목 단축키 다시 등록용)
 
     def __init__(self, data, settings):
         super().__init__()
@@ -527,6 +533,17 @@ class LauncherPage(QScrollArea):
     def save(self):
         save_json(LAUNCHER_FILE, self.data)
         self.mtime = file_mtime(LAUNCHER_FILE)
+        self.saved.emit()
+
+    def all_apps(self):
+        """런처의 모든 앱 항목 (폴더 안까지, 같은 항목이 즐겨찾기에 또 보여도 한 번만)"""
+        seen, out = set(), []
+        for items in self.data.values():
+            for it in flat_apps(items):
+                if id(it) not in seen:
+                    seen.add(id(it))
+                    out.append(it)
+        return out
 
     def cols(self):
         avail = self.viewport().width() - MARGIN - 12
@@ -852,6 +869,11 @@ class LauncherPage(QScrollArea):
         m.addAction("보관함에 고정", lambda: self.pinRequested.emit(it))
         m.addAction("파일 위치 열기", lambda: reveal(it["path"]))
         m.addSeparator()
+        m.addAction("단축키 설정…" if not it.get("hotkey") else f"단축키 변경…  ({it['hotkey']})",
+                    lambda: self.set_hotkey(it))
+        if it.get("hotkey"):
+            m.addAction("단축키 해제", lambda: self.clear_hotkey(it))
+        m.addAction("경로 변경…", lambda: self.change_path(it))
         m.addAction("이름 변경…", lambda: self.rename(it))
         m.addAction("삭제", lambda: self.remove(card))
         m.exec(pos)
@@ -876,6 +898,47 @@ class LauncherPage(QScrollArea):
             it["name"] = name.strip()
             self.save()
             self.rebuild()
+
+    def set_hotkey(self, it):
+        dlg = HotkeyDialog(self, it)
+        if not dlg.exec():
+            return
+        canon = HK.normalize(dlg.result_text)
+        if not canon:
+            QMessageBox.warning(self, "단축키", "쓸 수 없는 조합입니다.\nCtrl 또는 Alt 와 함께 글자·숫자·F1~F24 키를 누르세요.")
+            return
+        if canon in {HK.normalize(r) for r in RESERVED_HOTKEYS}:
+            QMessageBox.warning(self, "단축키", f"{canon} 은(는) 런처 자체 단축키입니다.")
+            return
+        for other in self.all_apps():
+            if other is not it and HK.normalize(other.get("hotkey", "")) == canon:
+                QMessageBox.warning(self, "단축키", f"{canon} 은(는) 이미 '{other['name']}' 에 지정돼 있습니다.\n"
+                                    "그쪽을 먼저 해제하세요.")
+                return
+        it["hotkey"] = canon
+        self.save()
+        self.rebuild()
+
+    def clear_hotkey(self, it):
+        it.pop("hotkey", None)
+        self.save()
+        self.rebuild()
+
+    def change_path(self, it):
+        """항목이 가리키는 파일/폴더/주소를 바꿈 (원본이 옮겨졌을 때). 이름·단축키·위치는 그대로"""
+        dlg = PathDialog(self, it)
+        if not dlg.exec():
+            return
+        new = dlg.result_path
+        if not new.startswith(("http", "shell:")):
+            new = os.path.normpath(new)
+            if not os.path.exists(new):
+                QMessageBox.warning(self, "경로 변경", f"없는 경로입니다:\n{new}")
+                return
+        it["path"] = new
+        self.save()
+        self.rebuild()
+        self.toast.emit(f"경로 변경: {it['name']}")
 
     def remove(self, card):
         if is_folder(card.item):
@@ -924,7 +987,8 @@ class LauncherPage(QScrollArea):
         self.rebuild()
 
     def add_app(self):
-        path, _ = QFileDialog.getOpenFileName(self, "앱/파일 선택", "", "모든 파일 (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "앱/파일 선택", "", "모든 파일 (*.*)",
+                                              options=QFileDialog.DontResolveSymlinks)   # .lnk 를 원본 경로로 바꾸지 않음
         if not path:
             return
         path = os.path.normpath(path)
@@ -934,6 +998,86 @@ class LauncherPage(QScrollArea):
         self.data.setdefault(cat, []).append({"name": Path(path).stem, "path": path})
         self.save()
         self.rebuild()
+
+
+RESERVED_HOTKEYS = ("Ctrl+Alt+L",)                  # 런처 자체 (HOTKEY_TEXT)
+
+
+class HotkeyDialog(QDialog):
+    """단축키 입력: 칸에 원하는 키 조합을 그대로 누르면 됨"""
+
+    def __init__(self, parent, item):
+        super().__init__(parent)
+        self.setWindowTitle("단축키 설정")
+        self.result_text = ""
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"'{item['name']}' 을(를) 실행할 단축키를 누르세요.\n"
+                             "런처가 숨어 있어도 동작합니다. 눌렀을 때 항상 새로 실행됩니다.\n"
+                             "(Ctrl 또는 Alt 포함, 런처 단축키·다른 항목과 겹치면 안 됩니다)"))
+        self.edit = QKeySequenceEdit()
+        self.edit.setMaximumSequenceLength(1)
+        if item.get("hotkey"):
+            self.edit.setKeySequence(item["hotkey"])
+        lay.addWidget(self.edit)
+        row = QHBoxLayout()
+        ok, cancel = QPushButton("확인"), QPushButton("취소")
+        ok.clicked.connect(self._ok)
+        cancel.clicked.connect(self.reject)
+        row.addStretch(1)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def _ok(self):
+        self.result_text = self.edit.keySequence().toString()
+        self.accept()
+
+
+class PathDialog(QDialog):
+    """경로 변경: 직접 입력하거나 파일/폴더 찾아보기 (.lnk 도 원본으로 바꾸지 않고 그대로 선택)"""
+
+    def __init__(self, parent, item):
+        super().__init__(parent)
+        self.setWindowTitle("경로 변경")
+        self.setMinimumWidth(560)
+        self.result_path = ""
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"'{item['name']}' 이(가) 가리킬 파일 / 폴더 / 주소:"))
+        self.edit = QLineEdit(item["path"])
+        lay.addWidget(self.edit)
+        row = QHBoxLayout()
+        bf, bd = QPushButton("파일 찾기…"), QPushButton("폴더 찾기…")
+        bf.clicked.connect(self._file)
+        bd.clicked.connect(self._dir)
+        ok, cancel = QPushButton("확인"), QPushButton("취소")
+        ok.clicked.connect(self._ok)
+        cancel.clicked.connect(self.reject)
+        row.addWidget(bf)
+        row.addWidget(bd)
+        row.addStretch(1)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def _start(self):
+        cur = self.edit.text().strip().strip('"')
+        return cur if os.path.exists(cur) else (os.path.dirname(cur) if os.path.isdir(os.path.dirname(cur)) else "")
+
+    def _file(self):
+        p, _ = QFileDialog.getOpenFileName(self, "파일 선택", self._start(), "모든 파일 (*.*)",
+                                           options=QFileDialog.DontResolveSymlinks)
+        if p:
+            self.edit.setText(os.path.normpath(p))
+
+    def _dir(self):
+        p = QFileDialog.getExistingDirectory(self, "폴더 선택", self._start())
+        if p:
+            self.edit.setText(os.path.normpath(p))
+
+    def _ok(self):
+        self.result_path = self.edit.text().strip().strip('"')
+        if self.result_path:
+            self.accept()
 
 
 # ───────────────────────── 트리 페이지 (최근 / 보관함) ─────────────────────────
@@ -997,6 +1141,24 @@ def lnk_target(p):
         return ""
 
 
+class RecentTree(QTreeWidget):
+    """최근 항목 목록: 끌면 '가리키는 실제 파일' 을 URL 로 내보냄 → 보관함에 놓으면 핀 꽂기 (보관함의 파일 드롭 처리 재사용)"""
+
+    def mimeData(self, items):
+        mime = QMimeData()
+        urls = []
+        for it in items:
+            t = lnk_target(it.data(0, Qt.UserRole))
+            if t and os.path.exists(t):
+                urls.append(QUrl.fromLocalFile(t))
+        mime.setUrls(urls)
+        return mime
+
+    def startDrag(self, actions):
+        if any(self.mimeData([i]).hasUrls() for i in self.selectedItems()):    # 대상이 사라진 항목만이면 끌지 않음
+            super().startDrag(Qt.CopyAction)
+
+
 class RecentPage(QWidget):
     activated = Signal(str)
     pinRequested = Signal(dict)
@@ -1007,8 +1169,11 @@ class RecentPage(QWidget):
         self.filter = ""
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.tree = make_tree()
+        self.tree = make_tree(RecentTree)
         self.tree.setColumnWidth(0, 230)
+        self.tree.setDragEnabled(True)
+        self.tree.setDragDropMode(QAbstractItemView.DragOnly)
+        self.tree.setDefaultDropAction(Qt.CopyAction)
         self.tree.itemClicked.connect(lambda it, _c: self.activated.emit(it.data(0, Qt.UserRole)))
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.menu)
@@ -1250,7 +1415,7 @@ class VaultPage(QWidget):
         target = self.node_of(target_item) if target_item is not None else self.root
         if target.get("type") == "group":
             target = self.root
-        self.add_paths(paths, target)
+        self.add_paths([p for p in paths if not self.has_path(p)], target)      # 이미 보관함에 있는 파일은 건너뜀
 
     def add_paths(self, paths, target=None):
         target = target or self.root
@@ -2118,6 +2283,10 @@ class Main(QWidget):
         self.hide_btn.setChecked(self.settings.get("hide_on_launch", False))
         self.hide_btn.toggled.connect(self.on_hide_toggle)
         self.recent_vault = RecentVaultPage(self.recent, self.vault)
+        self.item_hotkeys = HK.ItemHotkeys(self.hotkey_launch)
+        QApplication.instance().installNativeEventFilter(self.item_hotkeys)
+        self.launcher.saved.connect(self.apply_hotkeys)
+        QTimer.singleShot(0, self.apply_hotkeys)          # 토스트 라벨이 만들어진 뒤에 (등록 실패를 알려야 하므로)
         self.settings_page = SettingsPage(self)
         self.settings_page.toast.connect(self.say)
         self.search_page = SearchPage(self)
@@ -2439,6 +2608,39 @@ class Main(QWidget):
         self.launcher.data = load_json(LAUNCHER_FILE, {})
         self.launcher.mtime = file_mtime(LAUNCHER_FILE)
         self.launcher.rebuild()
+        self.apply_hotkeys()
+
+    # ---- 항목 전역 단축키 ----
+    tray = None
+
+    def apply_hotkeys(self):
+        entries = [(it["hotkey"], it) for it in self.launcher.all_apps() if it.get("hotkey")]
+        failed = self.item_hotkeys.apply(entries, reserved=RESERVED_HOTKEYS)
+        if failed:
+            msg = "단축키를 쓸 수 없음: " + ", ".join(f"{t} ({p['name']}: {why})" for t, p, why in failed)
+            self.say(msg)
+            if self.tray is not None:
+                self.tray.showMessage("JY Launcher", msg, QSystemTrayIcon.Warning, 6000)
+        return failed
+
+    def hotkey_launch(self, item):
+        """단축키로 실행: 창을 건드리지 않고, 항상 새로 실행"""
+        path = item["path"]
+        try:
+            if path.lower().endswith(".exe") and os.path.exists(path):
+                try:
+                    subprocess.Popen([path], cwd=os.path.dirname(path))
+                except OSError:                       # 관리자 권한 요구 등
+                    os.startfile(path)
+            elif path.startswith(("http", "shell:")) or os.path.exists(path):
+                os.startfile(path)
+            else:
+                raise FileNotFoundError(path)
+        except Exception as ex:
+            msg = f"단축키 실행 실패 ({item['name']}): {ex}"
+            self.say(msg)
+            if self.tray is not None:
+                self.tray.showMessage("JY Launcher", msg, QSystemTrayIcon.Warning, 5000)
 
     # ---- 키 처리 ----
     NAV_KEYS = (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right, Qt.Key_Return, Qt.Key_Enter,
@@ -2574,6 +2776,7 @@ def main():
     app.installNativeEventFilter(hk)
 
     tray = QSystemTrayIcon(app_icon("JYLauncher"), app)
+    w.tray = tray
     tray.setToolTip(f"JY Launcher  ({HOTKEY_TEXT})")
     tm = QMenu()
     tm.addAction("열기", w.summon)

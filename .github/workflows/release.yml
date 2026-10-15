@@ -67,6 +67,10 @@ jobs:
         shell: pwsh
         run: ./ci_test.ps1 test_smoke.py
 
+      - name: 테스트 - 새 기능 (단축키·팔레트·미리보기 등)
+        shell: pwsh
+        run: ./ci_test.ps1 test_features.py
+
       - name: Inno Setup 준비
         shell: pwsh
         run: |

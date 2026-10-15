@@ -354,6 +354,7 @@ class FileView(QTreeView):
         super().__init__()
         self.pinned = False
         self._edit_closed = 0.0
+        self._typed = 0.0
         self._mt = None                                 # 폴더 수정 시각(밖에서 파일이 생기거나 지워졌는지 확인용)
         self.search_page = None                    # '검색' 탭이면 화면에 보이는 SearchTabPage
         self.suspended_search = None               # 검색 결과에서 폴더로 들어간 상태: 잠시 숨겨 둔 검색 화면 (◀ 로 돌아옴)
@@ -498,6 +499,8 @@ class FileView(QTreeView):
 
     def refresh_if_changed(self):
         """다른 프로그램(브라우저 다운로드 등)이 폴더를 바꿨으면 다시 읽음 — 창으로 돌아올 때, 정렬을 바꿀 때 호출"""
+        if self.state() == QAbstractItemView.EditingState:
+            return                          # 이름 입력 중에 모델을 갈아 끼우면 입력창이 닫힘 (새 폴더 직후 등)
         if self.path and self.search_page is None and self._stamp() != self._mt:
             self.refresh()
 
@@ -652,6 +655,8 @@ class FileView(QTreeView):
                         os.startfile(p)
                     except OSError:
                         pass
+        elif k == Qt.Key_Space and not (m & (Qt.ControlModifier | Qt.ShiftModifier | Qt.AltModifier))                 and time.monotonic() - self._typed > 1.0 and self.preview_image():
+            pass                                                    # 사진이면 미리보기 (아니면 아래 기본 동작)
         elif k == Qt.Key_Backspace or (k == Qt.Key_Up and m & Qt.AltModifier):
             self.up()
         elif k == Qt.Key_Left and m & Qt.AltModifier:
@@ -669,7 +674,27 @@ class FileView(QTreeView):
         elif k == Qt.Key_Delete:
             self.keyAction.emit("permdelete" if shift else "delete")
         else:
+            if e.text() and e.text().isprintable() and not (ctrl or m & Qt.AltModifier):
+                self._typed = time.monotonic()                      # 글자를 치는 중(이름으로 찾기)의 Space 는 미리보기가 아님
             super().keyPressEvent(e)
+
+    def preview_image(self):
+        """Space: 선택한 파일이 사진이면 큰 화면으로 미리보기 (같은 폴더의 사진끼리 ← → 로 넘김). 열었으면 True"""
+        import imgpreview as IMG
+        sel = self.selected_paths()
+        if self.state() == QAbstractItemView.EditingState or len(sel) != 1 or not IMG.is_image(sel[0]):
+            return False
+        root = self.rootIndex()
+        paths = []
+        for r in range(self.model_.rowCount(root)):
+            p = os.path.normpath(self.model_.filePath(self.model_.index(r, 0, root)))
+            if IMG.is_image(p):
+                paths.append(p)
+        if os.path.normpath(sel[0]) not in paths:
+            return False
+        IMG.ImagePreview(paths, paths.index(os.path.normpath(sel[0])), self.window()).exec()
+        self.setFocus()
+        return True
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MiddleButton:
@@ -1091,11 +1116,16 @@ class Pane(QFrame):
         self.btn_refresh.setIcon(refresh_icon())
         self.btn_refresh.setIconSize(QSize(16, 16))
         self.btn_refresh.clicked.connect(lambda: self.view() and self.view().search_page is None and self.view().refresh())
+        self.btn_newfolder = self._nav_btn("", "새 폴더 (Ctrl+Shift+N)")
+        self.btn_newfolder.setIcon(new_folder_icon())
+        self.btn_newfolder.setIconSize(QSize(16, 16))
+        self.btn_newfolder.clicked.connect(self._new_folder_clicked)
         for w in (self.btn_back, self.btn_fwd, self.btn_up):
             nav.addWidget(w)
         nav.addWidget(self.pathbar, 1)
         nav.addWidget(self.btn_refresh)
         nav.addWidget(self.btn_new)
+        nav.addWidget(self.btn_newfolder)
         lay.addLayout(nav)
 
         self.tabbar = QTabBar()
@@ -1113,6 +1143,11 @@ class Pane(QFrame):
         self.stack = QStackedWidget()
         lay.addWidget(self.stack, 1)
 
+    def _new_folder_clicked(self):
+        v = self.view()
+        if v is not None and v.search_page is None and v.path:
+            self.main.new_folder(v)
+
     def _nav_btn(self, text, tip):
         b = QToolButton()
         b.setObjectName("nav")
@@ -1128,12 +1163,39 @@ class Pane(QFrame):
                 return p
         return None
 
+    def show_drop_hint(self, on):
+        """탭을 끌어 이 패널 위에 놓으면 여기로 옮겨진다는 표시 (파란 테두리 + 안내 글)"""
+        h = getattr(self, "_drop_hint", None)
+        if h is None:
+            if not on:
+                return
+            h = self._drop_hint = QLabel("여기에 놓으면 이 패널로 이동", self)
+            h.setAlignment(Qt.AlignCenter)
+            h.setAttribute(Qt.WA_TransparentForMouseEvents)
+            h.setStyleSheet("background: rgba(91,108,255,0.18); border: 2px solid #5b6cff; border-radius: 10px;"
+                            " color: white; font-size: 15px; font-weight: 600;")
+        if on:
+            h.setGeometry(self.rect())
+            h.show()
+            h.raise_()
+        else:
+            h.hide()
+
+    def _hint_drop_target(self, global_pos):
+        target = self._drop_target_pane(global_pos) if getattr(self, "_press_vid", None) is not None else None
+        for p in self.main.panes:
+            if p is not self:
+                p.show_drop_hint(p is target)
+
     def eventFilter(self, obj, e):
         if obj is self.tabbar and e.type() == e.Type.MouseButtonPress and e.button() == Qt.LeftButton:
             i = self.tabbar.tabAt(e.position().toPoint())
             self._press_vid = self.tabbar.tabData(i) if i >= 0 else None
+        if obj is self.tabbar and e.type() == e.Type.MouseMove and e.buttons() & Qt.LeftButton:
+            self._hint_drop_target(e.globalPosition().toPoint())
         if obj is self.tabbar and e.type() == e.Type.MouseButtonRelease and e.button() == Qt.LeftButton:
             vid, self._press_vid = getattr(self, "_press_vid", None), None
+            self._hint_drop_target(e.globalPosition().toPoint())      # 표시 끄기
             if vid is not None and vid in self.views and self._drop_target_pane(e.globalPosition().toPoint()):
                 QTimer.singleShot(0, lambda: self.main.send_tab_to_other(self, vid))      # 탭 끌기가 끝난 뒤에 넘김
         if obj is self.tabbar and e.type() == e.Type.MouseButtonRelease and e.button() == Qt.MiddleButton:
@@ -1972,6 +2034,20 @@ def refresh_icon():
     return QIcon(pm)
 
 
+def new_folder_icon():
+    """새 폴더: 폴더 윤곽 + 더하기"""
+    pm, pt = _canvas()
+    pt.setPen(QPen(_ICON_COLOR, 3.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    pt.setBrush(Qt.NoBrush)
+    pt.drawPolyline(QPolygonF([QPointF(6, 34), QPointF(6, 10), QPointF(16, 10), QPointF(20, 15), QPointF(36, 15),
+                               QPointF(36, 20)]))
+    pt.drawPolyline(QPolygonF([QPointF(6, 34), QPointF(28, 34)]))
+    pt.drawLine(33, 24, 33, 38)
+    pt.drawLine(26, 31, 40, 31)
+    pt.end()
+    return QIcon(pm)
+
+
 def search_icon():
     """돋보기"""
     pm, pt = _canvas()
@@ -2492,6 +2568,8 @@ SHORTCUT_HELP = (
         ("Alt+← / Alt+→", (), "뒤로 / 앞으로"),
         ("Alt+↑ · Backspace", (), "위 폴더로"),
         ("Ctrl+L", ("Ctrl+L",), "주소 입력 (경로를 붙여넣어 이동)"),
+        ("Space", (), "사진 미리보기 (사진을 선택하고 Space, ← → 로 같은 폴더의 다음/이전 사진, Space·Esc 닫기)"),
+        ("Ctrl+K", ("Ctrl+K",), "이동 팔레트 (탭·북마크·빠른 이동·최근 폴더를 글자로 찾아 이동, Ctrl+Enter = 새 탭)"),
         ("Ctrl+R", ("Ctrl+R",), "새로고침"),
         ("Ctrl+H", ("Ctrl+H",), "숨김 파일 표시 켜기/끄기"),
         ("F7", ("F7",), "1개 보기 ↔ 2개 보기"),
@@ -2881,6 +2959,7 @@ class Main(QMainWindow):
         sc("Ctrl+Alt+Right", self.send_tab_to_other)          # 현재 탭을 반대편 패널로 보내기
         sc("Ctrl+Alt+Left", self.send_tab_to_other)
         sc("Ctrl+L", lambda: (self.active.pathbar.setFocus(), self.active.pathbar.selectAll()))
+        sc("Ctrl+K", self.open_palette)                       # 이동 팔레트 (탭·북마크·빠른 이동·최근 폴더)
         sc("Ctrl+F", lambda: self.open_search("all"))               # 검색 탭: 전체 색인
         sc("Ctrl+Shift+F", lambda: self.open_search("folder"))      # 검색 탭: 지금 폴더 + 하위 폴더
         sc("Ctrl+D", lambda: self.toggle_bookmark(self.active_view().path))
@@ -3501,6 +3580,25 @@ class Main(QMainWindow):
             self.say(f"{len(paths)}개 휴지통으로 이동")
             QTimer.singleShot(400, lambda: self.refresh_dirs([os.path.dirname(x.rstrip("\\/")) for x in paths]))
         v.setFocus()
+
+    def open_palette(self):
+        """Ctrl+K: 열린 탭 · 북마크 · 빠른 이동 · 최근 방문 폴더를 한 목록에서 골라 이동"""
+        import palette as PAL
+        tabs, hist = [], []
+        for p in self.panes:
+            for v in p.views.values():
+                if v.search_page is None and v.path:
+                    tabs.append((tab_title(v.path), v.path))
+                hist.extend((tab_title(x), x) for x in reversed(v.hist[-20:]) if x)
+        marks = [(n.get("name", ""), n["path"]) for n in self._nodes() if n["type"] == "bookmark" and n.get("path")]
+        places = [(name, os.path.join(HOME, sub)) for name, sub in (("바탕화면", "Desktop"), ("다운로드", "Downloads"),
+                                                                     ("문서", "Documents"))]
+        mask = ctypes.windll.kernel32.GetLogicalDrives()                  # 네트워크 드라이브를 건드리지 않고 문자만 읽음
+        places += [(f"{chr(65 + i)}:", f"{chr(65 + i)}:\\") for i in range(26) if mask >> i & 1]
+        places += [(c.get("name", ""), c["path"]) for c in self.quick_items if c.get("path")]
+        dlg = PAL.Palette(PAL.build_entries([("탭", tabs), ("북마크", marks), ("빠른 이동", places), ("최근", hist)]), self)
+        dlg.chosen.connect(lambda path, new_tab: self.open_path(path, new_tab))
+        dlg.exec()
 
     def new_folder(self, view):
         if not view.path:
@@ -4367,6 +4465,7 @@ class Main(QMainWindow):
         m.addSeparator()
         m.addAction("단축키 보기  (F1)", self.show_shortcuts)
         m.addAction("검색 색인 (Everything)…", self.open_index_dialog)
+        m.addAction("파일 형식별 특수 열기…", self.open_special_settings)
         u = getattr(self, "updater", None)
         if u:
             m.addSeparator()
@@ -4380,6 +4479,16 @@ class Main(QMainWindow):
 
     def show_shortcuts(self):
         ShortcutDialog(self).exec()
+
+    def open_special_settings(self):
+        """설정 → 파일 형식별 특수 열기 (확장자 → 프로그램)"""
+        import specialopen_ui as SOU
+        dlg = SOU.SpecialOpenDialog(self, self.data.get("special_open"))
+        if dlg.exec() and dlg.result_rules is not None:
+            self.data["special_open"] = dlg.result_rules
+            specialopen.set_rules(dlg.result_rules)
+            save_json(EXPLORER_FILE, self.data)
+            self.say("파일 형식별 특수 열기 규칙을 저장했습니다")
 
     def open_index_dialog(self):
         """설정 → 검색 색인: Everything 이 색인한 볼륨/폴더를 보고 폴더 색인을 추가/제거 (없으면 설치 안내)"""

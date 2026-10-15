@@ -6,7 +6,7 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QFileInfo, QMimeData, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QFileInfo, QMimeData, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDrag, QKeySequence
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFileIconProvider, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
@@ -68,6 +68,18 @@ class StemDelegate(QStyledItemDelegate):
                 pass
         select()
         QTimer.singleShot(0, select)                     # 편집기가 포커스를 받으면서 전체 선택으로 바뀌는 것을 되돌림
+        if end < len(text):
+            editor.installEventFilter(self)              # → 키: 이름 선택 상태에서 확장자 앞(.)에 커서를 둠
+            editor.setProperty("stem_end", end)
+
+    def eventFilter(self, obj, e):
+        if (e.type() == QEvent.KeyPress and e.key() == Qt.Key_Right and e.modifiers() == Qt.NoModifier
+                and isinstance(obj, QLineEdit)):
+            end = obj.property("stem_end")
+            if end is not None and obj.hasSelectedText() and obj.selectionStart() == 0 and obj.selectionEnd() == end:
+                obj.setCursorPosition(end)               # 기본 동작은 맨 끝(확장자 뒤)이라 Backspace 가 확장자까지 지움
+                return True
+        return super().eventFilter(obj, e)
 
 
 class ResultsTree(QTreeWidget):
