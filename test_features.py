@@ -218,11 +218,11 @@ def main2():
     v.navigate(d)
     pump(1500)
     shown = []
-    IMG.ImagePreview.exec = lambda self: shown.append([os.path.normcase(x) for x in self.paths])
+    IMG.ImagePreview.exec = lambda self: shown.append([os.path.basename(x) for x in self.paths])      # 러너 임시 경로는 8.3 짧은 이름일 수 있어 이름만 비교
     v.select_path(names[1])
     pump(300)
     QTest.keyClick(v, Qt.Key_Space)
-    assert shown == [[os.path.normcase(os.path.normpath(x)) for x in names]], shown
+    assert shown == [[os.path.basename(x) for x in names]], shown
     v.select_path(os.path.join(d, "c.txt"))
     pump(300)
     QTest.keyClick(v, Qt.Key_Space)
