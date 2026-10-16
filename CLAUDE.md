@@ -18,3 +18,26 @@
 - 테스트: `ci_test.ps1` (PYTHONUTF8, QT offscreen). 콘솔 출력은 ASCII 로.
 - PowerShell 도구에서 `Remove-Item` 같은 삭제는 오탐 경고가 나므로 `(Get-Item x).Delete()` 사용.
 - 파일이 원인 불명으로 되돌려진 적이 있음 → 수정 후 바로 커밋하고 W 에 복사.
+
+---
+# 아래는 2026-10-16 에 JY HUB 세션이 덧붙인 내용입니다 (위의 사용자 규칙은 그대로 유효)
+
+GitHub: lovslave-netizen/JYLauncher_Explorer (**공개**, 2026-10-16 GitHub 에서 확인) — 계정 lovslave-netizen (개인)
+
+## 여러 PC 에서 이어서 하기 — 이제 기준은 GitHub
+- 위 "작업 방식"의 **W: 허브 + robocopy** 방식은, 사용자가 "모든 개발은 GitHub 에서 받아서 이어서 한다"로 정하면서 2026-10-16 부터 **GitHub 가 기준**으로 바뀌었다. 예전 방식은 참고만 한다.
+- 시작: `python -I E:\파이썬\JYDashBoard\tools\jyup.py start` (다른 PC 는 `W:\JYDashBoard\tools\jyup.py`). 같음 / GitHub 가 더 최신(자동으로 받음) / 이 PC 가 더 최신 / 갈라짐(멈추고 사용자에게 묻기).
+- **이 저장소는 공개이고 위 사용자 규칙이 우선한다**: push 는 사용자가 시킬 때만 하고, 중간 업로드가 필요해 보이면 먼저 묻는다. "올려"라고만 하면 "업로드할까요, 배포할까요?" 를 먼저 묻는다.
+
+## 실행 방법 (파일을 읽어 확인한 것)
+- JY Launcher: `run_launcher.bat` (= `pythonw JYLauncher.py`, 콘솔 없이). JY Explorer: `run_explorer.bat`.
+- 한 PC 에서 처음 쓸 때: `SETUP_first_time.bat` (PySide6, pywin32, pymediainfo 설치 — Python 3.13).
+- 설치판을 쓰는 PC 는 `JYTools-Setup-x.y.z.exe` 로 설치한다 (설치된 프로그램은 `--background` 로 시작하는 항목이 있음).
+
+## 배포 방법 (`.github/workflows/release.yml` 을 읽어 확인한 것)
+- 배포는 업로드와 **별개**이고, 사용자가 시킬 때만 한다. 하기 전에 **버전 번호와 올라갈 내용을 보여 주고 확인**받는다 (공개 저장소 + 설치된 프로그램이 자동 업데이트 안내를 받음).
+1. `version.py` 의 `__version__` 을 올려 커밋한다. (현재 최신 릴리스 v0.1.20 — 2026-10-16 확인)
+2. 같은 번호 태그를 만들어 push: `git tag vX.Y.Z` → `git push origin main` → `git push origin vX.Y.Z`.
+3. GitHub Actions(windows-latest)가 태그와 `version.py` 일치를 확인하고 테스트 9단계를 돌린 뒤 `build.ps1 -Installer` 로 빌드해서 `JYTools-Setup-X.Y.Z.exe` + `.sha256` 을 Releases 에 올린다.
+   → **이 PC 에 Inno Setup/PyInstaller 가 없어도 push 만 하면 된다.** 로컬에서 직접 빌드해 보려면 `pip install -r requirements-dev.txt` + Inno Setup 6 + `.\build.ps1 -Installer`.
+4. 설치된 프로그램들이 하루 1회 새 버전을 확인해 안내한다.
